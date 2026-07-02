@@ -1,0 +1,697 @@
+{
+  "format_version": 1,
+  "step": 15,
+  "next_agent_id": 48,
+  "ecosystem": {
+    "width": 50,
+    "height": 50,
+    "river_y": 25,
+    "north_spawn_prob": 0.05,
+    "south_spawn_prob": 0.5,
+    "north_food_energy": 10.0,
+    "south_food_energy": 40.0,
+    "south_cluster_size_range": [
+      3,
+      6
+    ],
+    "south_cluster_radius": 2,
+    "food_items": [
+      {
+        "x": 40,
+        "y": 21,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 39,
+        "y": 21,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 39,
+        "y": 18,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 36,
+        "y": 21,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 36,
+        "y": 17,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 38,
+        "y": 17,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 24,
+        "y": 23,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 22,
+        "y": 23,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 24,
+        "y": 25,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 23,
+        "y": 24,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 24,
+        "y": 25,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 45,
+        "y": 37,
+        "food_type": "north",
+        "energy": 10.0
+      },
+      {
+        "x": 29,
+        "y": 4,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 28,
+        "y": 0,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 28,
+        "y": 4,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 29,
+        "y": 3,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 28,
+        "y": 4,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 27,
+        "y": 3,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 7,
+        "y": 16,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 10,
+        "y": 17,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 9,
+        "y": 17,
+        "food_type": "south",
+        "energy": 40.0
+      },
+      {
+        "x": 10,
+        "y": 15,
+        "food_type": "south",
+        "energy": 40.0
+      }
+    ]
+  },
+  "agents": [
+    {
+      "agent_id": 0,
+      "x": 0,
+      "y": 16,
+      "g_e": 0.4974842447687494,
+      "g_t": 0.5025157552312506,
+      "energy": 54.0,
+      "hunger": 46.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 2,
+      "x": 7,
+      "y": 20,
+      "g_e": 0.10519286542362982,
+      "g_t": 0.8948071345763702,
+      "energy": 72.0,
+      "hunger": 28.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 3,
+      "x": 39,
+      "y": 37,
+      "g_e": 0.5793850438045459,
+      "g_t": 0.4206149561954541,
+      "energy": 55.0,
+      "hunger": 45.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 4,
+      "x": 38,
+      "y": 33,
+      "g_e": 0.157598266523041,
+      "g_t": 0.842401733476959,
+      "energy": 65.0,
+      "hunger": 35.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 5,
+      "x": 47,
+      "y": 46,
+      "g_e": 0.5090955961419199,
+      "g_t": 0.4909044038580801,
+      "energy": 70.0,
+      "hunger": 30.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 6,
+      "x": 48,
+      "y": 33,
+      "g_e": 0.558905003667369,
+      "g_t": 0.44109499633263105,
+      "energy": 62.0,
+      "hunger": 38.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 7,
+      "x": 5,
+      "y": 41,
+      "g_e": 0.9192763335202893,
+      "g_t": 0.08072366647971074,
+      "energy": 40.0,
+      "hunger": 60.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 8,
+      "x": 21,
+      "y": 7,
+      "g_e": 0.5503451674320636,
+      "g_t": 0.44965483256793637,
+      "energy": 27.0,
+      "hunger": 73.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 10,
+      "x": 16,
+      "y": 24,
+      "g_e": 0.7484868962492209,
+      "g_t": 0.25151310375077907,
+      "energy": 70.0,
+      "hunger": 30.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 11,
+      "x": 18,
+      "y": 25,
+      "g_e": 0.0003438759895421084,
+      "g_t": 0.9996561240104579,
+      "energy": 9.0,
+      "hunger": 91.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 12,
+      "x": 29,
+      "y": 42,
+      "g_e": 0.9236800989276769,
+      "g_t": 0.07631990107232312,
+      "energy": 42.0,
+      "hunger": 58.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 13,
+      "x": 21,
+      "y": 1,
+      "g_e": 0.44254946307789744,
+      "g_t": 0.5574505369221026,
+      "energy": 11.0,
+      "hunger": 89.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 14,
+      "x": 20,
+      "y": 24,
+      "g_e": 0.5425522018902872,
+      "g_t": 0.4574477981097128,
+      "energy": 64.0,
+      "hunger": 36.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 15,
+      "x": 39,
+      "y": 45,
+      "g_e": 0.2835846500290681,
+      "g_t": 0.7164153499709319,
+      "energy": 73.0,
+      "hunger": 27.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 16,
+      "x": 24,
+      "y": 2,
+      "g_e": 0.15220573014868555,
+      "g_t": 0.8477942698513145,
+      "energy": 71.0,
+      "hunger": 29.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 17,
+      "x": 19,
+      "y": 25,
+      "g_e": 0.5389274774326571,
+      "g_t": 0.4610725225673429,
+      "energy": 26.0,
+      "hunger": 74.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 18,
+      "x": 4,
+      "y": 23,
+      "g_e": 0.10903127055080375,
+      "g_t": 0.8909687294491963,
+      "energy": 54.0,
+      "hunger": 46.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 19,
+      "x": 32,
+      "y": 34,
+      "g_e": 0.13277471723818823,
+      "g_t": 0.8672252827618118,
+      "energy": 19.0,
+      "hunger": 81.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 20,
+      "x": 28,
+      "y": 32,
+      "g_e": 0.19745075143764335,
+      "g_t": 0.8025492485623567,
+      "energy": 17.0,
+      "hunger": 83.0,
+      "stress": 12.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 21,
+      "x": 40,
+      "y": 31,
+      "g_e": 0.601851583147387,
+      "g_t": 0.39814841685261304,
+      "energy": 41.0,
+      "hunger": 59.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 22,
+      "x": 29,
+      "y": 17,
+      "g_e": 0.15552229121352623,
+      "g_t": 0.8444777087864738,
+      "energy": 71.0,
+      "hunger": 29.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 23,
+      "x": 40,
+      "y": 29,
+      "g_e": 0.48705058158943637,
+      "g_t": 0.5129494184105636,
+      "energy": 70.0,
+      "hunger": 30.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 24,
+      "x": 0,
+      "y": 39,
+      "g_e": 0.7754751312298602,
+      "g_t": 0.22452486877013977,
+      "energy": 40.0,
+      "hunger": 60.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 25,
+      "x": 10,
+      "y": 4,
+      "g_e": 0.03727474283678356,
+      "g_t": 0.9627252571632164,
+      "energy": 64.0,
+      "hunger": 36.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 26,
+      "x": 35,
+      "y": 38,
+      "g_e": 0.8974236196480131,
+      "g_t": 0.1025763803519869,
+      "energy": 71.0,
+      "hunger": 29.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 27,
+      "x": 41,
+      "y": 27,
+      "g_e": 0.5299596775888462,
+      "g_t": 0.4700403224111538,
+      "energy": 35.0,
+      "hunger": 65.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 28,
+      "x": 32,
+      "y": 19,
+      "g_e": 0.15037123198865943,
+      "g_t": 0.8496287680113406,
+      "energy": 64.0,
+      "hunger": 36.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 29,
+      "x": 4,
+      "y": 42,
+      "g_e": 0.2992926801979815,
+      "g_t": 0.7007073198020185,
+      "energy": 70.0,
+      "hunger": 30.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 30,
+      "x": 40,
+      "y": 32,
+      "g_e": 0.28547668509584156,
+      "g_t": 0.7145233149041584,
+      "energy": 2.0,
+      "hunger": 98.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 31,
+      "x": 31,
+      "y": 13,
+      "g_e": 0.44020394681334263,
+      "g_t": 0.5597960531866574,
+      "energy": 63.0,
+      "hunger": 37.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 32,
+      "x": 41,
+      "y": 22,
+      "g_e": 0.4518514662995786,
+      "g_t": 0.5481485337004214,
+      "energy": 62.0,
+      "hunger": 38.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 33,
+      "x": 41,
+      "y": 33,
+      "g_e": 0.3016764411412709,
+      "g_t": 0.6983235588587291,
+      "energy": 17.0,
+      "hunger": 83.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 34,
+      "x": 27,
+      "y": 30,
+      "g_e": 0.7974686600687046,
+      "g_t": 0.20253133993129535,
+      "energy": 72.0,
+      "hunger": 28.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 35,
+      "x": 18,
+      "y": 3,
+      "g_e": 0.9668907362979372,
+      "g_t": 0.0331092637020628,
+      "energy": 70.0,
+      "hunger": 30.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 36,
+      "x": 42,
+      "y": 43,
+      "g_e": 0.039328787787054176,
+      "g_t": 0.9606712122129458,
+      "energy": 71.0,
+      "hunger": 29.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 37,
+      "x": 29,
+      "y": 30,
+      "g_e": 0.640064135778623,
+      "g_t": 0.359935864221377,
+      "energy": 27.0,
+      "hunger": 73.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 38,
+      "x": 10,
+      "y": 20,
+      "g_e": 0.3073520698728477,
+      "g_t": 0.6926479301271523,
+      "energy": 71.0,
+      "hunger": 29.0,
+      "stress": 0.0,
+      "generation": 0,
+      "is_alive": true
+    },
+    {
+      "agent_id": 41,
+      "x": 21,
+      "y": 23,
+      "g_e": 0.2157773165667881,
+      "g_t": 0.7842226834332119,
+      "energy": 32.0,
+      "hunger": 68.0,
+      "stress": 0.0,
+      "generation": 1,
+      "is_alive": true
+    },
+    {
+      "agent_id": 43,
+      "x": 19,
+      "y": 8,
+      "g_e": 0.5072268856903972,
+      "g_t": 0.4927731143096028,
+      "energy": 6.0,
+      "hunger": 94.0,
+      "stress": 0.0,
+      "generation": 1,
+      "is_alive": true
+    },
+    {
+      "agent_id": 45,
+      "x": 2,
+      "y": 38,
+      "g_e": 0.8617558526041176,
+      "g_t": 0.13824414739588237,
+      "energy": 23.0,
+      "hunger": 77.0,
+      "stress": 0.0,
+      "generation": 1,
+      "is_alive": true
+    },
+    {
+      "agent_id": 47,
+      "x": 41,
+      "y": 28,
+      "g_e": 0.4321664805916443,
+      "g_t": 0.5678335194083557,
+      "energy": 2.0,
+      "hunger": 98.0,
+      "stress": 0.0,
+      "generation": 1,
+      "is_alive": true
+    }
+  ],
+  "possible_agents": [
+    "agent_0",
+    "agent_1",
+    "agent_2",
+    "agent_3",
+    "agent_4",
+    "agent_5",
+    "agent_6",
+    "agent_7",
+    "agent_8",
+    "agent_9",
+    "agent_10",
+    "agent_11",
+    "agent_12",
+    "agent_13",
+    "agent_14",
+    "agent_15",
+    "agent_16",
+    "agent_17",
+    "agent_18",
+    "agent_19",
+    "agent_20",
+    "agent_21",
+    "agent_22",
+    "agent_23",
+    "agent_24",
+    "agent_25",
+    "agent_26",
+    "agent_27",
+    "agent_28",
+    "agent_29",
+    "agent_30",
+    "agent_31",
+    "agent_32",
+    "agent_33",
+    "agent_34",
+    "agent_35",
+    "agent_36",
+    "agent_37",
+    "agent_38",
+    "agent_39",
+    "agent_40",
+    "agent_41",
+    "agent_42",
+    "agent_43",
+    "agent_44",
+    "agent_45",
+    "agent_46",
+    "agent_47"
+  ]
+}

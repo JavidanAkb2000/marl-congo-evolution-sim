@@ -93,6 +93,8 @@ class EvolvableAgent:
         initial_energy: float = 100.0,
         initial_stress: float = 0.0,
         generation: int = 0,
+        age: int = 0,
+        max_age: Optional[int] = None,
         rng: Optional[random.Random] = None,
     ) -> None:
         """Initialize a new EvolvableAgent.
@@ -113,6 +115,17 @@ class EvolvableAgent:
                         spawned into the initial population; offspring
                         created by the genetic algorithm inherit
                         max(parent_generations) + 1.
+            age: Number of simulation ticks this agent has already
+                 lived through. Normally starts at 0; exposed as a
+                 constructor argument so a checkpoint reload can restore
+                 an agent's exact accumulated age.
+            max_age: Lifespan cap in simulation ticks. Once `age` reaches
+                      this value, `is_expired()` returns True and the
+                      environment is expected to retire the agent (an
+                      "old-age" death, independent of energy). None means
+                      no cap — the agent can theoretically live forever,
+                      which is also the default for full backward
+                      compatibility with any code that doesn't set this.
             rng: Optional shared random.Random instance for reproducible
                  experiments. A private instance is created if omitted.
         """
@@ -122,6 +135,8 @@ class EvolvableAgent:
         self.x = x
         self.y = y
         self.generation = generation
+        self.age = age
+        self.max_age = max_age
 
         # --- Digital Chromosome ---
         if forced_g_t is not None:
@@ -146,6 +161,20 @@ class EvolvableAgent:
         self.last_action_weights: Dict[ActionType, float] = {}
         self.last_action_probabilities: Dict[ActionType, float] = {}
         self.last_chosen_action: Optional[ActionType] = None
+
+    # ------------------------------------------------------------------
+    # Lifespan / aging
+    # ------------------------------------------------------------------
+    def increment_age(self, amount: int = 1) -> None:
+        """Advance this agent's age by one simulation tick (or `amount`)."""
+        self.age += amount
+
+    def is_expired(self) -> bool:
+        """True once this agent has reached its lifespan cap (old-age death).
+
+        Always False if `max_age` is None (no cap configured).
+        """
+        return self.max_age is not None and self.age >= self.max_age
 
     # ------------------------------------------------------------------
     # Fuzzy membership functions
@@ -454,6 +483,8 @@ class EvolvableAgent:
             "agent_id": self.agent_id,
             "position": (self.x, self.y),
             "generation": self.generation,
+            "age": self.age,
+            "max_age": self.max_age,
             "g_e": self.g_e,
             "g_t": self.g_t,
             "energy": self.energy,
@@ -468,6 +499,7 @@ class EvolvableAgent:
     def __repr__(self) -> str:
         return (
             f"EvolvableAgent(id={self.agent_id}, gen={self.generation}, "
+            f"age={self.age}/{self.max_age}, "
             f"pos=({self.x},{self.y}), "
             f"G_E={self.g_e:.2f}, G_T={self.g_t:.2f}, energy={self.energy:.1f}, "
             f"hunger={self.hunger:.1f}, stress={self.stress:.1f}, "

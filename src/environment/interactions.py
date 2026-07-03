@@ -45,21 +45,37 @@ class InteractionResolver:
     """
 
     # Tunable interaction constants.
-    # === OPTIMIZED ECOSYSTEM BALANCE FOR PHASE 4 ===
-    COMBAT_ENERGY_LOSS: float = 12.0  # 20.0-dan düşürüldü (Döyüş fəlakət dərəcəsində baha olmamalıdır)
-    COMBAT_SPOILS: float = 10.0  # 15.0-dan düşürüldü (Qənimət balanslaşdırıldı)
-    COMBAT_STRESS_GAIN: float = 12.0  # 15.0-dan düşürüldü
+    #
+    # === REBALANCED FOR ECOLOGICAL STABILITY ===
+    # The original values (COMBAT_ENERGY_LOSS=20, PREDATION_BASE_DAMAGE=15)
+    # were severe enough that even a single fight could wipe out most of
+    # an agent's energy bar outright, and a starving/aggressive population
+    # would chain ATTACK actions step after step, guaranteeing a rapid
+    # extinction death-spiral regardless of food availability. These
+    # values are lowered so combat is still meaningfully costly and
+    # dangerous, but survivable for a healthy agent, and no longer
+    # single-handedly drives total population collapse.
+    COMBAT_ENERGY_LOSS: float = 5.0
+    COMBAT_SPOILS: float = 6.0
+    COMBAT_STRESS_GAIN: float = 10.0
 
-    PREDATION_BASE_DAMAGE: float = 10.0  # 15.0-dan düşürüldü (Ovçuluq ziyanı azaldıldı)
-    PREDATION_STOLEN_ENERGY: float = 10.0  # 10.0 qaldı (ZƏRFƏR REJİMİ: Oğurlanan enerji zərərə bərabərdir!)
-    PREDATION_VICTIM_STRESS_GAIN: float = 20.0  # 25.0-dan düşürüldü
-    PREDATION_ATTACKER_STRESS_GAIN: float = 4.0  # 5.0-dan düşürüldü
+    PREDATION_BASE_DAMAGE: float = 8.0
+    PREDATION_STOLEN_ENERGY: float = 6.0
+    PREDATION_VICTIM_STRESS_GAIN: float = 15.0
+    PREDATION_ATTACKER_STRESS_GAIN: float = 3.0
 
-    DEFENSELESS_DAMAGE_MULTIPLIER: float = 2.0  # 2.0 qaldı (Yemək yeyəndə yaxalanmaq hələ də kritik cəzadır)
-    DEFENSELESS_STOLEN_ENERGY: float = 15.0  # 15.0 qaldı
-    DEFENSELESS_VICTIM_STRESS_GAIN: float = 25.0  # 30.0-dan düşürüldü
+    # Being caught mid-EAT is still a real, elevated risk (that's the
+    # point of the rule), but no longer an almost-guaranteed kill: on
+    # the old constants a full-health victim could lose 30 damage + 15
+    # stolen = 45 energy in one hit; now it's a survivable-but-costly
+    # 12 damage + 8 stolen = 20 energy.
+    DEFENSELESS_DAMAGE_MULTIPLIER: float = 1.5
+    DEFENSELESS_STOLEN_ENERGY: float = 8.0
+    DEFENSELESS_VICTIM_STRESS_GAIN: float = 20.0
 
-    ALLIANCE_STRESS_RELIEF: float = 25.0  # 20.0-dan qaldırıldı (Sülh və kooperasiya stimullaşdırılır!)
+    # Cooperation remains clearly the "safer" strategy: a strong stress
+    # payoff keeps peaceful agents comparatively calmer than combatants.
+    ALLIANCE_STRESS_RELIEF: float = 25.0
 
     def __init__(self, rng: Optional[random.Random] = None) -> None:
         self._rng = rng if rng is not None else random.Random()

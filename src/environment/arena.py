@@ -60,6 +60,15 @@ class CongoArena:
         interaction_resolver: Optional[InteractionResolver] = None,
         max_steps: Optional[int] = None,
         rng_seed: Optional[int] = None,
+        foraging_radius: Optional[int] = None,
+        food_seeking_bias: float = 0.85,
+        foraging_override_hunger_threshold: float = 40.0,
+        north_population_ratio: float = 0.70,
+        north_max_age_range: Tuple[int, int] = (150, 250),
+        south_max_age_range: Optional[Tuple[int, int]] = None,
+        north_clan_spawn_radius: int = 6,
+        initial_north_population: Optional[int] = None,
+        initial_south_population: Optional[int] = None,
     ) -> None:
         """Construct a CongoArena.
 
@@ -77,9 +86,95 @@ class CongoArena:
                        this value, all agents are marked truncated.
             rng_seed: Seed for the arena's shared RNG (drives spawning,
                       movement, combat rolls, and mutation).
+            foraging_radius: Chebyshev radius within which an agent can
+                              *see* food and steer toward it while
+                              executing a MOVE action. Defaults to
+                              `perception_radius` if omitted, so the
+                              same "vision" applies to both rival and
+                              food awareness unless explicitly split.
+            food_seeking_bias: Probability, in [0.0, 1.0], that a MOVE
+                                action steps directly toward the nearest
+                                visible food item rather than a fully
+                                random step. Kept below 1.0 on purpose
+                                so foraging isn't a perfect, deterministic
+                                pathfinder — agents still occasionally
+                                wander, preserving some exploration.
+            foraging_override_hunger_threshold: Hunger level above which
+                                the arena will override a "do-nothing"
+                                fuzzy-brain choice (EAT/COOPERATE/ATTACK
+                                attempted with no food or partner
+                                actually present) with MOVE, provided
+                                food is visible within `foraging_radius`.
+                                This closes a real blind spot in the
+                                Phase 3 fuzzy brain: its rules only favor
+                                MOVE when hunger is LOW, so a starving
+                                agent can get stuck repeatedly attempting
+                                a no-op action in place while reachable
+                                food sits untouched nearby. Set to a
+                                value >= 100 to disable this override
+                                entirely and restore pure fuzzy-brain
+                                behavior.
+            north_population_ratio: Fraction of `initial_population`
+                                spawned on the North bank by reset()
+                                (the remainder spawns on the South bank).
+                                Modeling the "many small-bodied,
+                                high-turnover Chimps vs fewer, stable
+                                Bonobos" demographic profile: a larger
+                                starting North cohort absorbs early
+                                intra-species selection losses.
+            north_max_age_range: Inclusive (min, max) lifespan cap, in
+                                simulation ticks, randomly assigned to
+                                each North-bank agent at birth (shorter
+                                — high stress/combat wear-and-tear).
+            south_max_age_range: Inclusive (min, max) lifespan cap for
+                                each South-bank agent at birth (longer —
+                                peaceful, stable life), or None to
+                                disable aging-based death entirely for
+                                South agents. Defaults to None: a
+                                finite cap, however generous, still
+                                turns a rare-but-survivable population
+                                stall (e.g. down to 2 agents who
+                                struggle to find each other to mate)
+                                into a guaranteed extinction deadline
+                                once both individuals age out. Since
+                                South is meant to represent a stable,
+                                low-conflict population, removing the
+                                cap entirely is the more faithful
+                                choice; set a finite range instead if
+                                bounded lifespans are specifically
+                                wanted for South.
+            north_clan_spawn_radius: Chebyshev radius around a randomly
+                                chosen North food hotspot within which
+                                each initial North-bank agent spawns.
+                                Models a troupe already living where its
+                                food source is, rather than a Chimp
+                                being placed uniformly at random
+                                somewhere in the ~1200-cell North band
+                                (most of which is desert) with no
+                                realistic chance of ever reaching a
+                                hotspot before starving.
+            initial_north_population: If given TOGETHER WITH
+                                `initial_south_population`, these two
+                                explicit counts override the
+                                `initial_population`/
+                                `north_population_ratio` split entirely.
+                                Useful for precise demographic
+                                calibration (e.g. "80 North, 60 South")
+                                without depending on rounding a ratio
+                                against a combined total.
+            initial_south_population: See `initial_north_population`.
         """
         self.ecosystem = ecosystem
         self.perception_radius = perception_radius
+        self.foraging_radius = foraging_radius if foraging_radius is not None else perception_radius
+        self.food_seeking_bias = max(0.0, min(1.0, food_seeking_bias))
+        self.foraging_override_hunger_threshold = foraging_override_hunger_threshold
+        self.north_population_ratio = max(0.0, min(1.0, north_population_ratio))
+        self.north_max_age_range = north_max_age_range
+        self.south_max_age_range = south_max_age_range
+        self.north_clan_spawn_radius = north_clan_spawn_radius
+        self.initial_north_population = initial_north_population
+        self.initial_south_population = initial_south_population
         self.max_steps = max_steps
 
         self._rng = random.Random(rng_seed)
@@ -156,14 +251,54 @@ class CongoArena:
         forced_g_t: Optional[float] = None,
         generation: int = 0,
         initial_energy: float = 100.0,
+        bank: Optional[str] = None,
     ) -> EvolvableAgent:
+        """Create and register a new agent.
+
+        If `bank == "north"` (and x/y aren't explicitly supplied), the
+        agent spawns as part of a "clan/troupe": placed within
+        `north_clan_spawn_radius` of a randomly-chosen North food
+        hotspot, rather than scattered anywhere across the whole
+        1200-cell North band. This is what actually makes the patchy
+        food design viable — a Chimp born miles from every hotspot has
+        no realistic way to ever reach one before starving, so the
+        initial population needs to already live where the food is,
+        the same way a real troupe occupies its territory around a
+        food source rather than being airdropped at random.
+
+        If `bank == "south"`, position is a uniform-random South cell
+        (South's food is broadly distributed, so no clan-clustering is
+        needed there). If `bank` is omitted entirely, position defaults
+        to anywhere on the grid and the lifespan range is inferred from
+        whichever bank the resolved `y` actually falls in.
+        """
         agent_id = self._next_agent_id
         self._next_agent_id += 1
 
-        if x is None:
-            x = self._rng.randint(0, self.ecosystem.width - 1)
-        if y is None:
-            y = self._rng.randint(0, self.ecosystem.height - 1)
+        if bank == "north":
+            if x is None or y is None:
+                hotspot_x, hotspot_y = self._rng.choice(self.ecosystem.north_hotspots)
+                radius = self.north_clan_spawn_radius
+                if x is None:
+                    x = hotspot_x + self._rng.randint(-radius, radius)
+                if y is None:
+                    y = hotspot_y + self._rng.randint(-radius, radius)
+                x, y = self.ecosystem.clamp_to_bounds(x, y)
+                # Never let the clan spawn spill south across the river.
+                y = max(y, self.ecosystem.river_y + 1)
+        elif bank == "south":
+            if x is None:
+                x = self._rng.randint(0, self.ecosystem.width - 1)
+            if y is None:
+                y = self._rng.randint(0, self.ecosystem.river_y)
+        else:
+            if x is None:
+                x = self._rng.randint(0, self.ecosystem.width - 1)
+            if y is None:
+                y = self._rng.randint(0, self.ecosystem.height - 1)
+
+        resolved_bank = bank if bank is not None else self.ecosystem.get_bank(y)
+        max_age = self._draw_max_age_for_bank(resolved_bank)
 
         agent = EvolvableAgent(
             agent_id=agent_id,
@@ -172,6 +307,7 @@ class CongoArena:
             forced_g_t=forced_g_t,
             initial_energy=initial_energy,
             generation=generation,
+            max_age=max_age,
             rng=self._rng,
         )
         self.agents_by_id[agent_id] = agent
@@ -179,6 +315,17 @@ class CongoArena:
         if name not in self.possible_agents:
             self.possible_agents.append(name)
         return agent
+
+    def _draw_max_age_for_bank(self, bank: str) -> Optional[int]:
+        """Randomly draw a lifespan cap for a newly-created agent by bank.
+
+        Returns None (no lifespan cap) if the relevant range is None.
+        """
+        age_range = self.north_max_age_range if bank == "north" else self.south_max_age_range
+        if age_range is None:
+            return None
+        low, high = age_range
+        return self._rng.randint(low, high)
 
     def reset(self, seed: Optional[int] = None) -> Dict[str, dict]:
         """Reset the ecosystem and spawn a fresh initial population.
@@ -196,8 +343,22 @@ class CongoArena:
         self.current_step = 0
         self.last_step_log = []
 
-        for _ in range(self._initial_population):
-            self._spawn_agent()
+        # Demographic split: explicit north/south counts take precedence
+        # (precise calibration, e.g. "80 North, 60 South") when both are
+        # given; otherwise fall back to the ratio-of-total split (North
+        # gets the larger default cohort to absorb its higher expected
+        # mortality, South the smaller, more stable cohort).
+        if self.initial_north_population is not None and self.initial_south_population is not None:
+            north_count = self.initial_north_population
+            south_count = self.initial_south_population
+        else:
+            north_count = round(self._initial_population * self.north_population_ratio)
+            south_count = self._initial_population - north_count
+
+        for _ in range(north_count):
+            self._spawn_agent(bank="north")
+        for _ in range(south_count):
+            self._spawn_agent(bank="south")
 
         self.agents = [self._agent_name(aid) for aid in self.agents_by_id]
         self.rewards = {name: 0.0 for name in self.agents}
@@ -302,15 +463,35 @@ class CongoArena:
                 chosen[aid] = override
             else:
                 food_present, rival_present, _ = self._sense(agent)
-                chosen[aid] = agent.decide_action(
+                brain_action = agent.decide_action(
                     food_present=food_present, rival_present=rival_present
                 )
+                chosen[aid] = self._apply_behavioral_override(agent, brain_action, food_present)
 
         # --- 2. Metabolism phase ---
         for aid in living_ids:
             agent = self.agents_by_id[aid]
             if agent.is_alive:
                 agent.apply_metabolism(chosen[aid])
+
+        # --- 2b. Aging phase ---
+        # Every agent still alive after paying this step's metabolic cost
+        # ages by one tick; agents that reach their lifespan cap die of
+        # old age here, independent of energy — a North-bank Chimp with
+        # full energy can still be retired for high combat/stress
+        # wear-and-tear, while a long-lived South-bank Bonobo simply has
+        # a much larger cap (or effectively none, if configured that way).
+        for aid in living_ids:
+            agent = self.agents_by_id[aid]
+            if not agent.is_alive:
+                continue
+            agent.increment_age()
+            if agent.is_expired():
+                agent.is_alive = False
+                log.append(
+                    f"AGING: Agent {agent.agent_id} died of old age "
+                    f"(age={agent.age}, max_age={agent.max_age})."
+                )
 
         # --- 3. Interaction phase (collision matrix) ---
         cells: Dict[Tuple[int, int], List[int]] = {}
@@ -412,12 +593,141 @@ class CongoArena:
             pass
         # ActionType.IDLE: no-op by definition.
 
-    def _move_agent(self, agent: EvolvableAgent) -> None:
-        """Move an agent one cell in a random legal direction (8-connected)."""
-        offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-        self._rng.shuffle(offsets)
+    def _is_in_north_hotspot(self, agent: EvolvableAgent) -> bool:
+        """True if the agent is on the North bank AND inside a food hotspot.
 
-        for dx, dy in offsets:
+        Used to grant the reproduction discount described in
+        GeneticEngine (`north_hotspot_fertility_threshold` /
+        `north_hotspot_reproduction_cost`): Chimpanzees holding a
+        productive patch breed faster to counteract higher mortality.
+        """
+        if self.ecosystem.get_bank(agent.y) != "north":
+            return False
+        return self.ecosystem.is_in_north_hotspot(agent.x, agent.y)
+
+    def _has_colocated_agent(self, agent: EvolvableAgent) -> bool:
+        """True if any OTHER living agent shares this agent's exact cell.
+
+        This is the actual mechanical requirement for ATTACK/COOPERATE to
+        have any effect at all: `InteractionResolver.resolve_cell` only
+        resolves interactions for agents sharing the exact same (x, y).
+        Sensing a rival within `perception_radius` is NOT the same thing
+        — a rival can be "present" for fuzzy-brain purposes while being
+        two or three cells away, in which case ATTACK/COOPERATE is a
+        guaranteed no-op this step.
+        """
+        for other in self.agents_by_id.values():
+            if other.agent_id == agent.agent_id or not other.is_alive:
+                continue
+            if other.x == agent.x and other.y == agent.y:
+                return True
+        return False
+
+    def _apply_behavioral_override(
+        self, agent: EvolvableAgent, action: ActionType, food_present: bool
+    ) -> ActionType:
+        """Correct two confirmed no-op traps in the Phase 3 fuzzy brain.
+
+        CONFIRMED BUG (root-caused via direct step-by-step tracing):
+        `rival_present`, which the fuzzy brain uses to weight ATTACK, is
+        computed from `perception_radius` — a rival can be "sensed" while
+        still 2-3 cells away. But ATTACK/COOPERATE only have a mechanical
+        effect when an agent shares the EXACT same cell as another agent
+        (see `InteractionResolver.resolve_cell`). A hungry, aggressive
+        agent can therefore repeatedly choose ATTACK against a rival it
+        can sense but never actually reach, paying the full -10 energy
+        cost each time with zero effect — freezing in place (ATTACK
+        performs no movement) and starving to death within a handful of
+        steps. Traced example: agent stayed at a fixed cell for 4
+        consecutive steps, chose ATTACK every time with no one actually
+        co-located, and died from pure self-inflicted metabolic cost
+        (41 -> 31 -> 21 -> 11 -> 1 -> dead), with no combat ever
+        occurring. Rule: if ATTACK/COOPERATE is chosen but no one is
+        actually standing on this agent's cell, it is unconditionally
+        redirected to MOVE — there is no scenario where repeating the
+        no-op action is better than closing the distance.
+
+        SEPARATE FORAGING GAP (from the earlier extinction-crisis fix):
+        if the agent is hungry, has no food on its own tile, but CAN see
+        food somewhere within `foraging_radius`, prioritize walking
+        toward it over an EAT/COOPERATE/ATTACK attempt that accomplishes
+        nothing locally.
+        """
+        if action in (ActionType.ATTACK, ActionType.COOPERATE) and not self._has_colocated_agent(
+            agent
+        ):
+            return ActionType.MOVE
+
+        if food_present:
+            return action
+        if action not in (ActionType.EAT, ActionType.COOPERATE, ActionType.ATTACK):
+            return action
+        if agent.hunger < self.foraging_override_hunger_threshold:
+            return action
+        if self._find_nearest_food(agent) is None:
+            return action
+        return ActionType.MOVE
+
+    def _find_nearest_food(self, agent: EvolvableAgent):
+        """Return the nearest visible FoodItem within `foraging_radius`, or None.
+
+        Distance is measured via Chebyshev distance (matching the
+        8-connected movement grid), so "nearest" corresponds directly to
+        "fewest MOVE steps away" rather than straight-line distance.
+        """
+        nearest_item = None
+        nearest_distance = None
+
+        for item in self.ecosystem.food_items:
+            distance = max(abs(item.x - agent.x), abs(item.y - agent.y))
+            if distance > self.foraging_radius:
+                continue
+            if nearest_item is None or distance < nearest_distance:
+                nearest_item = item
+                nearest_distance = distance
+
+        return nearest_item
+
+    @staticmethod
+    def _sign(value: int) -> int:
+        """Return -1, 0, or 1 for the sign of an integer delta."""
+        return (value > 0) - (value < 0)
+
+    def _move_agent(self, agent: EvolvableAgent) -> None:
+        """Move an agent one cell, steering toward visible food when possible.
+
+        If food is sensed within `foraging_radius`, the agent steps
+        toward the nearest item with probability `food_seeking_bias`
+        (falling back to a random legal step the rest of the time, and
+        whenever no food is visible at all — preserving the original
+        exploratory random walk in that case). This directly targets the
+        "blind random walk starves agents next to abundant food" failure
+        mode: agents can now actually find and reach nearby food instead
+        of relying on pure chance to stumble onto it.
+        """
+        all_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+        target_food = self._find_nearest_food(agent)
+        candidate_order: List[Tuple[int, int]]
+
+        if target_food is not None:
+            preferred = (self._sign(target_food.x - agent.x), self._sign(target_food.y - agent.y))
+            if preferred != (0, 0) and self._rng.random() < self.food_seeking_bias:
+                # Steer toward the food: try the direct step first, then
+                # fall back through the remaining offsets (shuffled) in
+                # case the direct step is illegal (out of bounds or would
+                # cross the river).
+                remaining = [o for o in all_offsets if o != preferred]
+                self._rng.shuffle(remaining)
+                candidate_order = [preferred] + remaining
+            else:
+                candidate_order = list(all_offsets)
+                self._rng.shuffle(candidate_order)
+        else:
+            candidate_order = list(all_offsets)
+            self._rng.shuffle(candidate_order)
+
+        for dx, dy in candidate_order:
             target_x, target_y = agent.x + dx, agent.y + dy
             if not self.ecosystem.is_within_bounds(target_x, target_y):
                 continue
@@ -430,12 +740,29 @@ class CongoArena:
     # ------------------------------------------------------------------
     # Reproduction / genetic algorithm phase
     # ------------------------------------------------------------------
+    def _reproduction_threshold_for(self, agent: EvolvableAgent) -> Optional[float]:
+        """Return the hotspot-discounted fertility threshold, or None for default."""
+        if self._is_in_north_hotspot(agent):
+            return self.genetic_engine.north_hotspot_fertility_threshold
+        return None
+
+    def _reproduction_cost_for(self, agent: EvolvableAgent) -> Optional[float]:
+        """Return the hotspot-discounted reproduction cost, or None for default."""
+        if self._is_in_north_hotspot(agent):
+            return self.genetic_engine.north_hotspot_reproduction_cost
+        return None
+
     def _process_reproduction(self, chosen_actions: Dict[int, ActionType]) -> List[str]:
         log: List[str] = []
 
         living = [a for a in self.agents_by_id.values() if a.is_alive]
+        current_population = len(living)
         fertile_sorted = sorted(
-            (a for a in living if self.genetic_engine.is_fertile(a)),
+            (
+                a
+                for a in living
+                if self.genetic_engine.is_fertile(a, self._reproduction_threshold_for(a))
+            ),
             key=lambda a: a.agent_id,
         )
 
@@ -452,7 +779,16 @@ class CongoArena:
                 action1 = chosen_actions.get(parent1.agent_id)
                 action2 = chosen_actions.get(parent2.agent_id)
 
-                if not self.genetic_engine.can_mate(parent1, parent2, action1, action2):
+                can_mate = self.genetic_engine.can_mate(
+                    parent1,
+                    parent2,
+                    action1,
+                    action2,
+                    threshold1=self._reproduction_threshold_for(parent1),
+                    threshold2=self._reproduction_threshold_for(parent2),
+                    current_population=current_population,
+                )
+                if not can_mate:
                     continue
 
                 child_position = (parent1.x, parent1.y)
@@ -461,11 +797,22 @@ class CongoArena:
                 )
                 self._next_agent_id += 1
 
+                # Lifespan policy is an arena/ecology concern, not a
+                # genetics concern, so it's assigned here based on the
+                # bank the child is actually born into (not inherited
+                # from either parent).
+                child_bank = self.ecosystem.get_bank(child.y)
+                child.max_age = self._draw_max_age_for_bank(child_bank)
+
                 self.agents_by_id[child.agent_id] = child
                 self.possible_agents.append(self._agent_name(child.agent_id))
 
-                self.genetic_engine.apply_reproduction_cost(parent1)
-                self.genetic_engine.apply_reproduction_cost(parent2)
+                self.genetic_engine.apply_reproduction_cost(
+                    parent1, self._reproduction_cost_for(parent1)
+                )
+                self.genetic_engine.apply_reproduction_cost(
+                    parent2, self._reproduction_cost_for(parent2)
+                )
 
                 used_ids.add(parent1.agent_id)
                 used_ids.add(parent2.agent_id)
@@ -473,7 +820,8 @@ class CongoArena:
                 log.append(
                     f"REPRODUCTION: Agent {parent1.agent_id} x Agent {parent2.agent_id} "
                     f"-> offspring Agent {child.agent_id} "
-                    f"(generation {child.generation}, G_T={child.g_t:.3f}, G_E={child.g_e:.3f})"
+                    f"(generation {child.generation}, bank={child_bank}, "
+                    f"max_age={child.max_age}, G_T={child.g_t:.3f}, G_E={child.g_e:.3f})"
                 )
                 break  # parent1 has mated this step; move to the next candidate.
 

@@ -62,6 +62,11 @@ class CheckpointManager:
                 "south_food_energy": ecosystem.south_food_energy,
                 "south_cluster_size_range": list(ecosystem.south_cluster_size_range),
                 "south_cluster_radius": ecosystem.south_cluster_radius,
+                "north_hotspot_count": ecosystem.north_hotspot_count,
+                "north_hotspot_radius": ecosystem.north_hotspot_radius,
+                "north_hotspot_spawn_size": list(ecosystem.north_hotspot_spawn_size),
+                "north_hotspots": [list(coord) for coord in ecosystem.north_hotspots],
+                "south_isolated_fruit_chance": ecosystem.south_isolated_fruit_chance,
                 "food_items": [
                     {"x": item.x, "y": item.y, "food_type": item.food_type, "energy": item.energy}
                     for item in ecosystem.food_items
@@ -78,6 +83,8 @@ class CheckpointManager:
                     "hunger": agent.hunger,
                     "stress": agent.stress,
                     "generation": agent.generation,
+                    "age": agent.age,
+                    "max_age": agent.max_age,
                     "is_alive": agent.is_alive,
                 }
                 for agent in arena.agents_by_id.values()
@@ -149,8 +156,22 @@ class CheckpointManager:
             south_food_energy=eco_data["south_food_energy"],
             south_cluster_size_range=tuple(eco_data["south_cluster_size_range"]),
             south_cluster_radius=eco_data["south_cluster_radius"],
+            # .get(...) with a default preserves backward compatibility
+            # with checkpoints saved before these tunables existed.
+            north_hotspot_count=eco_data.get("north_hotspot_count", 4),
+            north_hotspot_radius=eco_data.get("north_hotspot_radius", 3),
+            north_hotspot_spawn_size=tuple(eco_data.get("north_hotspot_spawn_size", (1, 3))),
+            south_isolated_fruit_chance=eco_data.get("south_isolated_fruit_chance", 0.30),
             rng_seed=rng_seed,
         )
+        # The constructor already generated a fresh, randomized set of
+        # hotspots. If this checkpoint recorded specific hotspot
+        # coordinates (the normal case), overwrite them so the restored
+        # ecosystem's food "geography" is IDENTICAL to the saved one,
+        # not just statistically similar.
+        if "north_hotspots" in eco_data:
+            ecosystem.north_hotspots = [tuple(coord) for coord in eco_data["north_hotspots"]]
+
         for item in eco_data["food_items"]:
             ecosystem.add_food(
                 x=item["x"], y=item["y"], food_type=item["food_type"], energy=item["energy"]
@@ -181,6 +202,8 @@ class CheckpointManager:
                 initial_energy=agent_data["energy"],
                 initial_stress=agent_data["stress"],
                 generation=agent_data["generation"],
+                age=agent_data.get("age", 0),
+                max_age=agent_data.get("max_age", None),
                 rng=arena._rng,
             )
             # forced_g_t already reproduces g_e = 1 - g_t; explicitly

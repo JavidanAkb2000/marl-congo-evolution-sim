@@ -40,6 +40,35 @@ class GeneticEngine:
         mating_max_distance: Maximum Chebyshev distance between two
                               agents for them to be considered "adjacent"
                               and eligible to mate.
+        north_hotspot_fertility_threshold: A LOWER fertility energy
+                              threshold applied when an agent is
+                              currently standing within a North Bank food
+                              hotspot (see CongoEcosystem.north_hotspots),
+                              letting Chimpanzees breed faster while
+                              holding a productive patch to counteract
+                              their generally higher mortality.
+        north_hotspot_reproduction_cost: A LOWER reproduction energy
+                              cost applied under the same hotspot
+                              condition, for the same reason.
+        low_population_threshold: When the TOTAL living population (as
+                              reported by the caller) is at or below
+                              this count, mating checks use
+                              `low_population_mating_distance` instead
+                              of `mating_max_distance`. This directly
+                              targets the extinction-bottleneck/Allee
+                              effect: once a population crashes to a
+                              handful of individuals scattered across a
+                              large grid, they may simply never wander
+                              close enough to find each other under the
+                              normal short-range distance, freezing the
+                              population indefinitely (or, with aging
+                              enabled, guaranteeing extinction). Giving
+                              survivors a much longer "social attraction
+                              range" when desperately few remain models
+                              real crisis-response mate-seeking behavior.
+        low_population_mating_distance: The expanded Chebyshev mating
+                              distance used once the population is at
+                              or below `low_population_threshold`.
     """
 
     def __init__(
@@ -51,6 +80,10 @@ class GeneticEngine:
         mutation_sigma: float = 0.05,
         offspring_initial_energy: float = 50.0,
         mating_max_distance: int = 1,
+        north_hotspot_fertility_threshold: float = 50.0,
+        north_hotspot_reproduction_cost: float = 12.0,
+        low_population_threshold: int = 5,
+        low_population_mating_distance: int = 15,
         rng: Optional[random.Random] = None,
     ) -> None:
         if not (0.0 <= crossover_weight_parent1 <= 1.0):
@@ -65,15 +98,27 @@ class GeneticEngine:
         self.mutation_sigma = mutation_sigma
         self.offspring_initial_energy = offspring_initial_energy
         self.mating_max_distance = mating_max_distance
+        self.north_hotspot_fertility_threshold = north_hotspot_fertility_threshold
+        self.north_hotspot_reproduction_cost = north_hotspot_reproduction_cost
+        self.low_population_threshold = low_population_threshold
+        self.low_population_mating_distance = low_population_mating_distance
 
         self._rng = rng if rng is not None else random.Random()
 
     # ------------------------------------------------------------------
     # Eligibility checks
     # ------------------------------------------------------------------
-    def is_fertile(self, agent: EvolvableAgent) -> bool:
-        """An agent is Fertile if alive and energy exceeds the threshold."""
-        return agent.is_alive and agent.energy > self.reproduction_energy_threshold
+    def is_fertile(self, agent: EvolvableAgent, fertility_threshold: Optional[float] = None) -> bool:
+        """An agent is Fertile if alive and energy exceeds the threshold.
+
+        `fertility_threshold` lets a caller (e.g. the arena, for a North
+        agent standing in a food hotspot) substitute a lower bar than
+        the global default without mutating shared engine state.
+        """
+        threshold = (
+            fertility_threshold if fertility_threshold is not None else self.reproduction_energy_threshold
+        )
+        return agent.is_alive and agent.energy > threshold
 
     def can_mate(
         self,
@@ -81,23 +126,36 @@ class GeneticEngine:
         agent2: EvolvableAgent,
         action1: Optional[ActionType],
         action2: Optional[ActionType],
+        threshold1: Optional[float] = None,
+        threshold2: Optional[float] = None,
+        current_population: Optional[int] = None,
     ) -> bool:
         """Determine whether two agents may reproduce this step.
 
-        Requires: both alive, both Fertile, occupying the same or an
-        adjacent cell (Chebyshev distance <= mating_max_distance), and
-        both having selected a non-aggressive action (i.e. neither
-        chose ATTACK).
+        Requires: both alive, both Fertile (each judged against its own
+        `threshold1`/`threshold2` override if supplied, else the global
+        default), occupying the same or an adjacent cell (Chebyshev
+        distance <= the applicable max distance), and both having
+        selected a non-aggressive action (i.e. neither chose ATTACK).
+
+        `current_population`, if supplied, lets the mating distance
+        itself widen automatically once the total living population is
+        at or below `low_population_threshold` — see the class
+        docstring for the extinction-bottleneck rationale.
         """
         if agent1.agent_id == agent2.agent_id:
             return False
-        if not (self.is_fertile(agent1) and self.is_fertile(agent2)):
+        if not (self.is_fertile(agent1, threshold1) and self.is_fertile(agent2, threshold2)):
             return False
         if action1 == ActionType.ATTACK or action2 == ActionType.ATTACK:
             return False
 
+        max_distance = self.mating_max_distance
+        if current_population is not None and current_population <= self.low_population_threshold:
+            max_distance = self.low_population_mating_distance
+
         distance = max(abs(agent1.x - agent2.x), abs(agent1.y - agent2.y))
-        return distance <= self.mating_max_distance
+        return distance <= max_distance
 
     # ------------------------------------------------------------------
     # Crossover / mutation
@@ -178,11 +236,16 @@ class GeneticEngine:
         # construction equals final_g_e since final_g_t + final_g_e == 1.
         return child
 
-    def apply_reproduction_cost(self, parent: EvolvableAgent) -> None:
-        """Deduct the metabolic cost of reproduction from a parent."""
+    def apply_reproduction_cost(self, parent: EvolvableAgent, cost: Optional[float] = None) -> None:
+        """Deduct the metabolic cost of reproduction from a parent.
+
+        `cost` lets a caller substitute a lower, hotspot-discounted cost
+        without mutating shared engine state; defaults to `reproduction_cost`.
+        """
         if not parent.is_alive:
             return
-        parent.energy = max(0.0, min(100.0, parent.energy - self.reproduction_cost))
+        actual_cost = cost if cost is not None else self.reproduction_cost
+        parent.energy = max(0.0, min(100.0, parent.energy - actual_cost))
         parent.hunger = 100.0 - parent.energy
         if parent.energy <= 0.0:
             parent.is_alive = False

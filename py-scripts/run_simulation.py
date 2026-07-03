@@ -50,38 +50,72 @@ def print_header(title: str) -> None:
 
 
 def build_arena(rng_seed: int = 2026) -> CongoArena:
-    """Construct a fresh, fully-wired CongoArena."""
+    """Construct a fresh, fully-wired CongoArena.
+
+    Demographic profile (Gorilla-competition / resource-patchiness model):
+        - North Bank (Chimpanzee): 80 starting agents (down from an
+          earlier 140 — the original count mathematically guaranteed
+          starvation regardless of behavior; confirmed via a controlled
+          test where even a 100%-cooperative North population still
+          collapsed from pure resource math). Food concentrated in 4
+          fixed hotspots, now calibrated to ~150-200 combined energy/step
+          — enough to actually sustain ~80 agents living around them,
+          not just enough to bait them into a hotspot and starve.
+          Cheaper/faster reproduction while holding a hotspot, and a
+          short lifespan cap — a high-turnover, high-combat, "many
+          small-bodied competitors" strategy.
+        - South Bank (Bonobo): 60 starting agents, food spread uniformly
+          and stably across the whole bank, standard reproduction
+          economics, and NO lifespan cap — a low-turnover, low-conflict,
+          K-selected strategy that shouldn't have an artificial extinction
+          deadline imposed on a population stall.
+    """
     ecosystem = CongoEcosystem(
         width=50,
         height=50,
         river_y=25,
-        north_spawn_prob=0.05,
+        north_spawn_prob=0.25,             # now evaluated PER HOTSPOT, independently, each step
         south_spawn_prob=0.50,
-        north_food_energy=10.0,
+        north_food_energy=35.0,            # boosted: one hotspot meal now dwarfs the -10 ATTACK cost
         south_food_energy=40.0,
-        south_cluster_size_range=(3, 6),
+        south_cluster_size_range=(2, 4),
         south_cluster_radius=2,
+        north_hotspot_count=4,             # still only 4 dense choke-points in all of North territory
+        north_hotspot_radius=3,
+        north_hotspot_spawn_size=(3, 6),   # denser per-firing-hotspot drop
+        south_isolated_fruit_chance=0.30,  # South stays broadly uniform/stable
         rng_seed=rng_seed,
     )
     genetic_engine = GeneticEngine(
-        reproduction_energy_threshold=80.0,
-        reproduction_cost=30.0,
+        reproduction_energy_threshold=65.0,
+        reproduction_cost=20.0,
         crossover_weight_parent1=0.6,
         mutation_rate=0.05,
         mutation_sigma=0.05,
         offspring_initial_energy=50.0,
         mating_max_distance=1,
+        north_hotspot_fertility_threshold=50.0,  # North breeds faster/cheaper while IN a hotspot
+        north_hotspot_reproduction_cost=12.0,
+        low_population_threshold=5,   # <=5 total agents alive -> "crisis" mate-seeking mode
+        low_population_mating_distance=15,  # dramatically widened search range in a crisis
     )
     interaction_resolver = InteractionResolver()
 
     arena = CongoArena(
         ecosystem=ecosystem,
-        initial_population=40,
+        initial_population=140,       # kept for backward compatibility; overridden below
         perception_radius=3,
         genetic_engine=genetic_engine,
         interaction_resolver=interaction_resolver,
         max_steps=None,
         rng_seed=rng_seed,
+        foraging_radius=4,
+        food_seeking_bias=0.85,
+        initial_north_population=80,      # explicit calibrated counts, not a ratio-of-total
+        initial_south_population=60,
+        north_max_age_range=(150, 250),   # short, stress/combat-worn lifespan
+        south_max_age_range=None,         # aging disabled entirely for the stable Bonobo population
+        north_clan_spawn_radius=6,        # troupe starts living AROUND its hotspot, not scattered
     )
     return arena
 
@@ -110,6 +144,8 @@ def snapshot(arena: CongoArena) -> dict:
                 round(a.hunger, 6),
                 round(a.stress, 6),
                 a.generation,
+                a.age,
+                a.max_age,
                 a.is_alive,
             )
             for aid, a in sorted(arena.agents_by_id.items())
@@ -177,13 +213,17 @@ def main() -> None:
     restored_arena = CheckpointManager.load(
         checkpoint_path,
         genetic_engine=GeneticEngine(
-            reproduction_energy_threshold=80.0,
-            reproduction_cost=30.0,
+            reproduction_energy_threshold=65.0,
+            reproduction_cost=20.0,
             crossover_weight_parent1=0.6,
             mutation_rate=0.05,
             mutation_sigma=0.05,
             offspring_initial_energy=50.0,
             mating_max_distance=1,
+            north_hotspot_fertility_threshold=50.0,
+            north_hotspot_reproduction_cost=12.0,
+            low_population_threshold=5,
+            low_population_mating_distance=15,
         ),
         interaction_resolver=InteractionResolver(),
         perception_radius=3,

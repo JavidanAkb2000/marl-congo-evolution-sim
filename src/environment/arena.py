@@ -69,6 +69,14 @@ class CongoArena:
         north_clan_spawn_radius: int = 6,
         initial_north_population: Optional[int] = None,
         initial_south_population: Optional[int] = None,
+        gorilla_stress_penalty: float = 25.0,
+        gorilla_energy_penalty: float = 4.0,
+        north_birth_dispersal_radius: int = 8,
+        crowding_radius: int = 3,
+        crowding_soft_cap: int = 8,
+        crowding_stress_per_excess: float = 1.5,
+        crowding_migration_trigger: int = 12,
+        migration_vision_radius: int = 25,
     ) -> None:
         """Construct a CongoArena.
 
@@ -175,6 +183,19 @@ class CongoArena:
         self.north_clan_spawn_radius = north_clan_spawn_radius
         self.initial_north_population = initial_north_population
         self.initial_south_population = initial_south_population
+        self.gorilla_stress_penalty = gorilla_stress_penalty
+        self.gorilla_energy_penalty = gorilla_energy_penalty
+        self.north_birth_dispersal_radius = north_birth_dispersal_radius
+        self.crowding_radius = crowding_radius
+        self.crowding_soft_cap = crowding_soft_cap
+        self.crowding_stress_per_excess = crowding_stress_per_excess
+        self.crowding_migration_trigger = crowding_migration_trigger
+        self.migration_vision_radius = migration_vision_radius
+
+        # Per-step caches (populated during step(); initialized here so
+        # any early access is safe).
+        self._density_map: Dict[Tuple[int, int], int] = {}
+        self._local_crowd_cache: Dict[int, int] = {}
         self.max_steps = max_steps
 
         self._rng = random.Random(rng_seed)
@@ -277,7 +298,13 @@ class CongoArena:
 
         if bank == "north":
             if x is None or y is None:
-                hotspot_x, hotspot_y = self._rng.choice(self.ecosystem.north_hotspots)
+                open_hotspots = [
+                    self.ecosystem.north_hotspots[i]
+                    for i in range(self.ecosystem.north_hotspot_count)
+                    if not self.ecosystem.is_hotspot_gorilla_occupied(i)
+                ]
+                spawn_pool = open_hotspots if open_hotspots else self.ecosystem.north_hotspots
+                hotspot_x, hotspot_y = self._rng.choice(spawn_pool)
                 radius = self.north_clan_spawn_radius
                 if x is None:
                     x = hotspot_x + self._rng.randint(-radius, radius)
@@ -493,6 +520,30 @@ class CongoArena:
                     f"(age={agent.age}, max_age={agent.max_age})."
                 )
 
+        # --- 2c. Crowding-stress phase (North only) ---
+        # Density-dependent regulation: North chimps packed too tightly
+        # around a single patch accrue soft stress proportional to how far
+        # local crowd exceeds `crowding_soft_cap`. This raises their stress
+        # (feeding the fuzzy brain toward leaving/aggression) WITHOUT
+        # directly killing them — the "get out of the mob" pressure. South
+        # bonobos are exempt: their cohesive grouping is the whole point of
+        # that bank. The density map is also cached here for reuse by the
+        # migration logic in the individual-resolution phase below.
+        self._density_map = self._build_density_map()
+        self._local_crowd_cache = {}
+        for aid in living_ids:
+            agent = self.agents_by_id[aid]
+            if not agent.is_alive:
+                continue
+            if self.ecosystem.get_bank(agent.y) != "north":
+                continue
+            crowd = self._local_crowd(agent, self._density_map)
+            self._local_crowd_cache[aid] = crowd
+            excess = crowd - self.crowding_soft_cap
+            if excess > 0:
+                added = excess * self.crowding_stress_per_excess
+                agent.stress = max(0.0, min(100.0, agent.stress + added))
+
         # --- 3. Interaction phase (collision matrix) ---
         cells: Dict[Tuple[int, int], List[int]] = {}
         for aid in living_ids:
@@ -519,7 +570,45 @@ class CongoArena:
             agent = self.agents_by_id[aid]
             if not agent.is_alive or suppress.get(aid, False):
                 continue
-            self._apply_individual_action(agent, chosen[aid])
+
+            # If this North agent is severely overcrowded, hand its move a
+            # migration target: the nearest reachable open hotspot it can
+            # "see" with its long-range migration vision. This turns the
+            # crowding stress into a directed exodus toward real, less
+            # contested food instead of a blind scatter into empty desert.
+            migration_target = None
+            crowd = self._local_crowd_cache.get(aid)
+            if crowd is not None and crowd >= self.crowding_migration_trigger:
+                migration_target = self._nearest_open_hotspot(agent)
+
+            action = chosen[aid]
+            # A migrating agent commits to moving toward the target patch.
+            # Its fuzzy brain, stressed by crowding, will often pick
+            # ATTACK/COOPERATE — but if there's no agent actually on its
+            # cell to act on, those are wasted no-ops that leave it drifting
+            # instead of migrating. So when migrating: redirect EAT/IDLE
+            # unconditionally, and redirect ATTACK/COOPERATE too UNLESS
+            # someone is genuinely co-located (a real fight/alliance we
+            # shouldn't cancel). This makes the migration target actually
+            # pull the agent out of the mob toward the emptier patch.
+            if migration_target is not None:
+                if action in (ActionType.EAT, ActionType.IDLE):
+                    action = ActionType.MOVE
+                elif action in (ActionType.ATTACK, ActionType.COOPERATE) and not self._has_colocated_agent(agent):
+                    action = ActionType.MOVE
+
+            self._apply_individual_action(agent, action, migration_target=migration_target)
+
+        # --- 4b. Gorilla-displacement phase ---
+        # After movement resolves, any chimp now standing inside a
+        # gorilla-occupied hotspot is displaced by the resident silverback
+        # troop: it takes a stress hit plus a small energy cost (the
+        # exertion/threat of being chased off) and is repelled to an
+        # adjacent free cell. Gorillas never actually fight — their sheer
+        # presence is an "invisible wall" the chimps simply cannot hold
+        # ground against. This is what keeps the richest patches
+        # permanently off-limits and fragments the chimp population.
+        log.extend(self._apply_gorilla_displacement(living_ids))
 
         # --- 5. Ecosystem tick ---
         self.ecosystem.step()
@@ -579,9 +668,71 @@ class CongoArena:
     # ------------------------------------------------------------------
     # Individual action resolution
     # ------------------------------------------------------------------
-    def _apply_individual_action(self, agent: EvolvableAgent, action: ActionType) -> None:
+    def _apply_gorilla_displacement(self, living_ids: List[int]) -> List[str]:
+        """Displace any chimp standing inside a gorilla-occupied hotspot.
+
+        Each affected agent takes `gorilla_stress_penalty` stress and
+        `gorilla_energy_penalty` energy, then is repelled to an adjacent
+        legal cell (reusing the same repel routine combat losers use).
+        Returns a (usually short) log of displacement events.
+        """
+        log: List[str] = []
+        for aid in living_ids:
+            agent = self.agents_by_id.get(aid)
+            if agent is None or not agent.is_alive:
+                continue
+            if self.ecosystem.get_bank(agent.y) != "north":
+                continue
+            if self.ecosystem.gorilla_hotspot_index_at(agent.x, agent.y) is None:
+                continue
+
+            agent.stress = max(0.0, min(100.0, agent.stress + self.gorilla_stress_penalty))
+            agent.energy = max(0.0, min(100.0, agent.energy - self.gorilla_energy_penalty))
+            agent.hunger = 100.0 - agent.energy
+            if agent.energy <= 0.0:
+                agent.is_alive = False
+                log.append(f"GORILLA: Agent {agent.agent_id} did not survive being driven off a gorilla patch.")
+                continue
+
+            self._repel_from_gorilla(agent)
+
+        return log
+
+    def _repel_from_gorilla(self, agent: EvolvableAgent) -> None:
+        """Push a displaced chimp to an adjacent legal cell OUTSIDE any gorilla zone.
+
+        Prefers a neighboring cell that is both on the same bank (never
+        crossing the river) and not itself gorilla-occupied, so the chimp
+        is genuinely pushed out rather than shuffled within the forbidden
+        patch. Falls back to any legal neighbor if fully surrounded.
+        """
+        offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        self._rng.shuffle(offsets)
+
+        fallback: Optional[Tuple[int, int]] = None
+        for dx, dy in offsets:
+            target_x, target_y = agent.x + dx, agent.y + dy
+            if not self.ecosystem.is_within_bounds(target_x, target_y):
+                continue
+            if not self.ecosystem.is_move_legal(agent.y, target_y):
+                continue
+            if fallback is None:
+                fallback = (target_x, target_y)
+            if self.ecosystem.gorilla_hotspot_index_at(target_x, target_y) is None:
+                agent.x, agent.y = target_x, target_y
+                return
+
+        if fallback is not None:
+            agent.x, agent.y = fallback
+
+    def _apply_individual_action(
+        self,
+        agent: EvolvableAgent,
+        action: ActionType,
+        migration_target: Optional[Tuple[int, int]] = None,
+    ) -> None:
         if action == ActionType.MOVE:
-            self._move_agent(agent)
+            self._move_agent(agent, migration_target=migration_target)
         elif action == ActionType.EAT:
             energy_value = self.ecosystem.consume_food_at(agent.x, agent.y, max_items=1)
             if energy_value > 0.0:
@@ -668,6 +819,60 @@ class CongoArena:
             return action
         return ActionType.MOVE
 
+    def _build_density_map(self) -> Dict[Tuple[int, int], int]:
+        """Return a map of cell -> living-agent count, computed once per step.
+
+        Used to answer "how crowded is this agent's neighborhood" cheaply:
+        instead of an O(n) scan per agent (O(n^2) overall), we bucket all
+        agents into their cells once, then each agent sums the buckets in
+        its `crowding_radius` neighborhood.
+        """
+        density: Dict[Tuple[int, int], int] = {}
+        for agent in self.agents_by_id.values():
+            if not agent.is_alive:
+                continue
+            key = (agent.x, agent.y)
+            density[key] = density.get(key, 0) + 1
+        return density
+
+    def _local_crowd(self, agent: EvolvableAgent, density_map: Dict[Tuple[int, int], int]) -> int:
+        """Count living agents within `crowding_radius` of this agent (incl. self)."""
+        r = self.crowding_radius
+        total = 0
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                total += density_map.get((agent.x + dx, agent.y + dy), 0)
+        return total
+
+    def _nearest_open_hotspot(self, agent: EvolvableAgent) -> Optional[Tuple[int, int]]:
+        """Return the coordinate of the nearest non-gorilla, non-depleted
+        North hotspot within `migration_vision_radius`, excluding the one
+        the agent is essentially already standing on.
+
+        This is the "migration compass": when a chimp is too crowded, it
+        can see far past its normal short foraging range to locate a less
+        contested patch to head toward, so density pressure actually
+        results in dispersal to real food rather than aimless wandering
+        into empty desert.
+        """
+        best_coord: Optional[Tuple[int, int]] = None
+        best_distance: Optional[int] = None
+        for index, (hx, hy) in enumerate(self.ecosystem.north_hotspots):
+            state = self.ecosystem.hotspot_state[index]
+            if state["gorilla_occupied"] or state["depleted"]:
+                continue
+            distance = max(abs(hx - agent.x), abs(hy - agent.y))
+            if distance > self.migration_vision_radius:
+                continue
+            # Skip the patch it's already sitting on (radius+1 slack), so
+            # "migrate" always means "go somewhere else".
+            if distance <= self.ecosystem.north_hotspot_radius:
+                continue
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_coord = (hx, hy)
+        return best_coord
+
     def _find_nearest_food(self, agent: EvolvableAgent):
         """Return the nearest visible FoodItem within `foraging_radius`, or None.
 
@@ -693,30 +898,27 @@ class CongoArena:
         """Return -1, 0, or 1 for the sign of an integer delta."""
         return (value > 0) - (value < 0)
 
-    def _move_agent(self, agent: EvolvableAgent) -> None:
-        """Move an agent one cell, steering toward visible food when possible.
+    def _move_agent(self, agent: EvolvableAgent, migration_target: Optional[Tuple[int, int]] = None) -> None:
+        """Move an agent one cell.
 
-        If food is sensed within `foraging_radius`, the agent steps
-        toward the nearest item with probability `food_seeking_bias`
-        (falling back to a random legal step the rest of the time, and
-        whenever no food is visible at all — preserving the original
-        exploratory random walk in that case). This directly targets the
-        "blind random walk starves agents next to abundant food" failure
-        mode: agents can now actually find and reach nearby food instead
-        of relying on pure chance to stumble onto it.
+        Priority:
+          1. If a `migration_target` is supplied (the agent is overcrowded
+             and there's a reachable less-contested open hotspot), steer
+             toward that target. This is the "escape the mob, head to the
+             emptier patch" behavior — it overrides local food-seeking so a
+             crowded agent actually leaves instead of orbiting the same
+             exhausted cell.
+          2. Otherwise, if food is visible within `foraging_radius`, steer
+             toward the nearest item with probability `food_seeking_bias`.
+          3. Otherwise, random legal walk (exploration).
         """
         all_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-
-        target_food = self._find_nearest_food(agent)
         candidate_order: List[Tuple[int, int]]
 
-        if target_food is not None:
-            preferred = (self._sign(target_food.x - agent.x), self._sign(target_food.y - agent.y))
-            if preferred != (0, 0) and self._rng.random() < self.food_seeking_bias:
-                # Steer toward the food: try the direct step first, then
-                # fall back through the remaining offsets (shuffled) in
-                # case the direct step is illegal (out of bounds or would
-                # cross the river).
+        if migration_target is not None:
+            tx, ty = migration_target
+            preferred = (self._sign(tx - agent.x), self._sign(ty - agent.y))
+            if preferred != (0, 0):
                 remaining = [o for o in all_offsets if o != preferred]
                 self._rng.shuffle(remaining)
                 candidate_order = [preferred] + remaining
@@ -724,8 +926,19 @@ class CongoArena:
                 candidate_order = list(all_offsets)
                 self._rng.shuffle(candidate_order)
         else:
-            candidate_order = list(all_offsets)
-            self._rng.shuffle(candidate_order)
+            target_food = self._find_nearest_food(agent)
+            if target_food is not None:
+                preferred = (self._sign(target_food.x - agent.x), self._sign(target_food.y - agent.y))
+                if preferred != (0, 0) and self._rng.random() < self.food_seeking_bias:
+                    remaining = [o for o in all_offsets if o != preferred]
+                    self._rng.shuffle(remaining)
+                    candidate_order = [preferred] + remaining
+                else:
+                    candidate_order = list(all_offsets)
+                    self._rng.shuffle(candidate_order)
+            else:
+                candidate_order = list(all_offsets)
+                self._rng.shuffle(candidate_order)
 
         for dx, dy in candidate_order:
             target_x, target_y = agent.x + dx, agent.y + dy
@@ -751,6 +964,43 @@ class CongoArena:
         if self._is_in_north_hotspot(agent):
             return self.genetic_engine.north_hotspot_reproduction_cost
         return None
+
+    def _compute_child_position(self, parent: EvolvableAgent) -> Tuple[int, int]:
+        """Decide where a newborn spawns relative to its parent.
+
+        NORTH (Chimp): offspring disperse — placed at a random offset up
+        to `north_birth_dispersal_radius` cells from the parent (kept on
+        the North bank, in bounds, and OUT of gorilla zones where
+        possible). This models real chimpanzee fission: juveniles and
+        females scatter to find their own patches rather than piling onto
+        the parent's exact cell. It's the direct fix for the observed
+        "rich-get-richer" super-colony, where every birth stacking on one
+        coordinate let a single hotspot swell to thousands of agents.
+
+        SOUTH (Bonobo): offspring stay put (born on the parent's cell),
+        modeling cohesive bonobo groups that don't fragment — which is
+        exactly what lets them form the stable, bonded society the South
+        bank is meant to represent.
+        """
+        if self.ecosystem.get_bank(parent.y) != "north":
+            return (parent.x, parent.y)
+
+        radius = self.north_birth_dispersal_radius
+        best: Optional[Tuple[int, int]] = None
+        for _ in range(8):  # a few attempts to land a non-gorilla, legal cell
+            dx = self._rng.randint(-radius, radius)
+            dy = self._rng.randint(-radius, radius)
+            tx, ty = parent.x + dx, parent.y + dy
+            tx, ty = self.ecosystem.clamp_to_bounds(tx, ty)
+            # Keep the child on the North bank (never across the river).
+            if self.ecosystem.get_bank(ty) != "north":
+                ty = max(ty, self.ecosystem.river_y + 1)
+            if best is None:
+                best = (tx, ty)
+            if self.ecosystem.gorilla_hotspot_index_at(tx, ty) is None:
+                return (tx, ty)
+
+        return best if best is not None else (parent.x, parent.y)
 
     def _process_reproduction(self, chosen_actions: Dict[int, ActionType]) -> List[str]:
         log: List[str] = []
@@ -791,7 +1041,7 @@ class CongoArena:
                 if not can_mate:
                     continue
 
-                child_position = (parent1.x, parent1.y)
+                child_position = self._compute_child_position(parent1)
                 child = self.genetic_engine.reproduce(
                     parent1, parent2, self._next_agent_id, child_position
                 )

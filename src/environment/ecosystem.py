@@ -102,6 +102,24 @@ class CongoEcosystem:
                                       full fruit-tree cluster, breaking
                                       up the purely-clustered look with
                                       more naturally scattered filler.
+        midway_food_prob: Per-step probability of spawning "travel snack"
+                           food (low-value filler like leaves/insects)
+                           somewhere in the OPEN North desert BETWEEN the
+                           reachable hotspots. Models the real chimpanzee
+                           behavior of opportunistically foraging low-value
+                           food while traveling long distances between
+                           major fruit patches. Deliberately kept low so
+                           the midway corridor is survivable-but-lean: it
+                           lets a migrating chimp top up enough energy to
+                           reach the next patch, without being rich enough
+                           to live on (which would raise carrying capacity
+                           and worsen boom-bust).
+        midway_food_energy: Energy value of a single travel-snack item —
+                             far below `north_food_energy`, since these
+                             are low-quality filler foods.
+        midway_food_max_per_step: Upper bound on travel-snack items spawned
+                                    per triggered step, keeping the
+                                    corridor sparse.
     """
 
     def __init__(
@@ -119,6 +137,12 @@ class CongoEcosystem:
         north_hotspot_radius: int = 3,
         north_hotspot_spawn_size: Tuple[int, int] = (3, 6),
         south_isolated_fruit_chance: float = 0.30,
+        gorilla_occupied_count: int = 2,
+        depletion_threshold: float = 400.0,
+        depletion_recovery_steps: int = 40,
+        midway_food_prob: float = 0.15,
+        midway_food_energy: float = 4.0,
+        midway_food_max_per_step: int = 2,
         rng_seed: Optional[int] = None,
     ) -> None:
         if width <= 0 or height <= 0:
@@ -127,6 +151,13 @@ class CongoEcosystem:
             raise ValueError("river_y must lie within the grid's vertical bounds.")
         if north_hotspot_count < 1:
             raise ValueError("north_hotspot_count must be at least 1.")
+        if not (0 <= gorilla_occupied_count < north_hotspot_count):
+            # Strictly fewer than the total, so at least one hotspot is
+            # always gorilla-free and reachable by chimpanzees.
+            raise ValueError(
+                "gorilla_occupied_count must be in [0, north_hotspot_count) so that at "
+                "least one hotspot always remains chimp-accessible."
+            )
 
         self.width = width
         self.height = height
@@ -142,6 +173,12 @@ class CongoEcosystem:
         self.north_hotspot_radius = north_hotspot_radius
         self.north_hotspot_spawn_size = north_hotspot_spawn_size
         self.south_isolated_fruit_chance = south_isolated_fruit_chance
+        self.gorilla_occupied_count = gorilla_occupied_count
+        self.depletion_threshold = depletion_threshold
+        self.depletion_recovery_steps = depletion_recovery_steps
+        self.midway_food_prob = midway_food_prob
+        self.midway_food_energy = midway_food_energy
+        self.midway_food_max_per_step = midway_food_max_per_step
 
         self._rng = random.Random(rng_seed)
 
@@ -153,6 +190,19 @@ class CongoEcosystem:
         # directly (e.g. by CheckpointManager.load) to restore an exact
         # previously-generated layout.
         self.north_hotspots: List[Tuple[int, int]] = self._generate_north_hotspots()
+
+        # Per-hotspot dynamic state, indexed parallel to north_hotspots.
+        # Models the two real-world pressures on northern chimpanzee food:
+        #   - gorilla_occupied: a silverback troop permanently "owns" the
+        #     richest hotspots. Food still spawns there (gorillas sit and
+        #     eat leisurely, they don't clear it), but any chimp entering
+        #     is displaced — see CongoArena's gorilla-repel handling.
+        #   - depleted / recovery: the non-gorilla hotspots are the
+        #     "contested leftovers"; over-foraging one exhausts it for a
+        #     while (patch depletion), forcing chimps to disperse to
+        #     other patches (real fission-fusion) rather than all piling
+        #     onto a single infinite tree forever.
+        self.hotspot_state: List[dict] = self._init_hotspot_state()
 
         # Primary food store: a flat list of FoodItem objects.
         # Multi-occupancy is supported implicitly since several items
@@ -171,6 +221,45 @@ class CongoEcosystem:
             y = self._rng.randint(self.river_y + 1, self.height - 1)
             hotspots.append((x, y))
         return hotspots
+
+    def _init_hotspot_state(self) -> List[dict]:
+        """Initialize per-hotspot dynamic state.
+
+        The first `gorilla_occupied_count` hotspots are flagged as
+        permanent gorilla territory ("the reserved spots"); the rest are
+        open, contested, and subject to the depletion cycle ("the
+        hard-to-reach leftovers"). Which specific hotspots are gorilla
+        territory is stable for the life of the ecosystem — a silverback
+        troop's home range doesn't wander day to day.
+        """
+        state = []
+        for index in range(self.north_hotspot_count):
+            state.append(
+                {
+                    "gorilla_occupied": index < self.gorilla_occupied_count,
+                    "depleted": False,
+                    "recovery_timer": 0,
+                    "consumed_accumulator": 0.0,
+                }
+            )
+        return state
+
+    def is_hotspot_gorilla_occupied(self, index: int) -> bool:
+        """True if the hotspot at `index` is permanent gorilla territory."""
+        return self.hotspot_state[index]["gorilla_occupied"]
+
+    def gorilla_hotspot_index_at(self, x: int, y: int) -> Optional[int]:
+        """Return the index of a gorilla-occupied hotspot covering (x, y), else None.
+
+        Used by the arena to decide whether a chimp stepping onto (x, y)
+        should be displaced by the resident gorilla troop.
+        """
+        for index, (hx, hy) in enumerate(self.north_hotspots):
+            if not self.hotspot_state[index]["gorilla_occupied"]:
+                continue
+            if max(abs(x - hx), abs(y - hy)) <= self.north_hotspot_radius:
+                return index
+        return None
 
     def is_in_north_hotspot(self, x: int, y: int) -> bool:
         """True if (x, y) lies within `north_hotspot_radius` of any hotspot."""
@@ -228,9 +317,16 @@ class CongoEcosystem:
     # Food / state management
     # ------------------------------------------------------------------
     def reset(self) -> None:
-        """Clear all food and reset the step counter to a fresh state."""
+        """Clear all food and reset the step counter to a fresh state.
+
+        Hotspot *geography* (locations) is intentionally preserved — it's
+        fixed terrain — but per-hotspot *dynamic* state (depletion,
+        recovery timers, consumption accumulators) is reset so a new
+        episode starts with every contested patch fresh.
+        """
         self.food_items.clear()
         self.current_step = 0
+        self.hotspot_state = self._init_hotspot_state()
 
     def add_food(self, x: int, y: int, food_type: BankType, energy: float) -> FoodItem:
         """Add a single food item to the grid at (x, y).
@@ -276,7 +372,31 @@ class CongoEcosystem:
         total_energy = sum(item.energy for item in matches)
         matched_ids = {id(item) for item in matches}
         self.food_items = [item for item in self.food_items if id(item) not in matched_ids]
+
+        # Patch-depletion bookkeeping: when a chimp eats North food, add
+        # its energy to the nearest hotspot's consumption accumulator.
+        # Once accumulated consumption crosses `depletion_threshold`, the
+        # step() logic flips that hotspot to "depleted" and it stops
+        # producing until it recovers — the mechanism that forces
+        # chimpanzees to disperse off an over-exploited patch.
+        if total_energy > 0.0 and any(item.food_type == "north" for item in matches):
+            hotspot_index = self._nearest_hotspot_index(x, y)
+            if hotspot_index is not None:
+                north_energy = sum(item.energy for item in matches if item.food_type == "north")
+                self.hotspot_state[hotspot_index]["consumed_accumulator"] += north_energy
+
         return total_energy
+
+    def _nearest_hotspot_index(self, x: int, y: int) -> Optional[int]:
+        """Index of the Chebyshev-nearest hotspot to (x, y), or None if none defined."""
+        nearest_index = None
+        nearest_distance = None
+        for index, (hx, hy) in enumerate(self.north_hotspots):
+            distance = max(abs(x - hx), abs(y - hy))
+            if nearest_index is None or distance < nearest_distance:
+                nearest_index = index
+                nearest_distance = distance
+        return nearest_index
 
     def get_food_matrix(self) -> List[List[int]]:
         """Return a (height x width) matrix of food item counts per cell.
@@ -305,30 +425,33 @@ class CongoEcosystem:
     # Resource spawning engine
     # ------------------------------------------------------------------
     def _spawn_north_food(self) -> None:
-        """Patchy, choke-point scarcity spawn logic for the North Bank.
+        """Patchy, contested spawn logic for the North Bank (Chimpanzee).
 
-        CALIBRATION NOTE (carrying-capacity rebalance): each of the
-        `north_hotspots` now rolls its `north_spawn_prob` INDEPENDENTLY
-        every step (this used to be a single global roll that picked
-        ONE hotspot at most per step). With the default 4 hotspots at
-        `north_spawn_prob=0.25`, expected firing hotspots per step =
-        4 x 0.25 = 1.0; each firing hotspot drops an average of
-        (3+6)/2 = 4.5 items at the boosted `north_food_energy` (35.0),
-        for an expected combined output of ~157.5 energy/step across
-        the whole North bank — calibrated against a ~75-90 agent North
-        population's baseline metabolic demand (see build_arena()).
-        Everywhere outside a hotspot radius remains a hard desert; this
-        is still a deliberate "resource patchiness" design that forces
-        competing agents into a handful of choke-points, but the
-        *combined* throughput of those choke-points is now sized to
-        actually be able to feed the population living around them,
-        rather than mathematically guaranteeing mass starvation
-        regardless of behavior (which was the actual root cause behind
-        the earlier fast North extinctions — confirmed via a controlled
-        test where even a 100%-cooperative, zero-aggression North
-        population still collapsed from pure resource math).
+        Each hotspot rolls its `north_spawn_prob` independently every
+        step, but WHAT that means depends on its state:
+
+          - Gorilla-occupied hotspots ("the reserved spots"): still
+            spawn food normally. Real silverback troops sit on the
+            richest patches and feed leisurely — the fruit is there,
+            it's just that no chimp can safely reach it. The *blocking*
+            of chimps happens in the arena (any chimp stepping in is
+            displaced), NOT by withholding the food here. This keeps the
+            reserved spots visibly rich-but-forbidden, which is exactly
+            the pressure that fragments the chimp population.
+
+          - Depleted hotspots ("over-foraged leftovers"): produce
+            nothing while recovering. Chimps must move on.
+
+          - Open, non-depleted hotspots ("the contested leftovers"):
+            spawn normally; these are what rival chimp clans fight over.
         """
-        for hotspot_x, hotspot_y in self.north_hotspots:
+        for index, (hotspot_x, hotspot_y) in enumerate(self.north_hotspots):
+            state = self.hotspot_state[index]
+
+            # A depleted patch grows nothing until it recovers.
+            if state["depleted"]:
+                continue
+
             if self._rng.random() >= self.north_spawn_prob:
                 continue
 
@@ -347,6 +470,110 @@ class CongoEcosystem:
                 clamped_y = max(clamped_y, self.river_y + 1)
 
                 self.add_food(x=clamped_x, y=clamped_y, food_type="north", energy=self.north_food_energy)
+
+    def _open_hotspot_coords(self) -> List[Tuple[int, int]]:
+        """Coordinates of currently open (non-gorilla, non-depleted) hotspots."""
+        return [
+            self.north_hotspots[i]
+            for i in range(self.north_hotspot_count)
+            if not self.hotspot_state[i]["gorilla_occupied"] and not self.hotspot_state[i]["depleted"]
+        ]
+
+    def _spawn_midway_food(self) -> None:
+        """Spawn sparse, low-value 'travel snack' food along the corridors
+        BETWEEN open hotspots (real chimpanzee midway foraging).
+
+        Each triggered step, a small number of low-energy items are placed
+        at points sampled ALONG the straight line connecting two open
+        hotspots (with slight perpendicular jitter), so the food actually
+        lands in the desert a migrating chimp crosses — not clumped at
+        either endpoint. Placement explicitly avoids:
+          - any hotspot's own radius (so it never just inflates a patch's
+            local supply and re-encourages pile-up), and
+          - gorilla-occupied zones (which chimps can't use anyway).
+
+        Requires at least two open hotspots to define a corridor; with
+        fewer, there's nothing to travel between, so nothing spawns.
+        """
+        if self._rng.random() >= self.midway_food_prob:
+            return
+
+        open_coords = self._open_hotspot_coords()
+        if len(open_coords) < 2:
+            return
+
+        a, b = self._rng.sample(open_coords, 2)
+        count = self._rng.randint(1, self.midway_food_max_per_step)
+
+        placed = 0
+        attempts = 0
+        # Cap attempts so a corridor that's mostly blocked by hotspot radii
+        # can't loop forever; sparse placement is fine.
+        while placed < count and attempts < count * 6:
+            attempts += 1
+            t = self._rng.uniform(0.2, 0.8)  # stay in the MIDDLE of the corridor
+            base_x = a[0] + (b[0] - a[0]) * t
+            base_y = a[1] + (b[1] - a[1]) * t
+            jitter_x = self._rng.randint(-2, 2)
+            jitter_y = self._rng.randint(-2, 2)
+
+            x, y = self.clamp_to_bounds(int(round(base_x)) + jitter_x, int(round(base_y)) + jitter_y)
+            y = max(y, self.river_y + 1)  # keep it on the North bank
+
+            # Don't drop snacks inside any hotspot radius or gorilla zone —
+            # the whole point is to feed the JOURNEY, not the destinations.
+            if self.is_in_north_hotspot(x, y):
+                continue
+
+            self.add_food(x=x, y=y, food_type="north", energy=self.midway_food_energy)
+            placed += 1
+
+    def _update_hotspot_depletion(self) -> None:
+        """Advance the patch depletion/recovery cycle for open hotspots.
+
+        Gorilla-occupied hotspots never deplete (the gorillas keep chimps
+        out, so chimps can't over-forage them in the first place). For
+        open hotspots: once accumulated chimp consumption crosses
+        `depletion_threshold`, the patch flips to depleted and stops
+        producing for `depletion_recovery_steps` steps, after which it
+        recovers with a fresh accumulator.
+
+        A hard safety floor guarantees that recovery-driven depletion can
+        never leave EVERY open hotspot dark at once: if flipping this
+        patch to depleted would starve the whole open set, the flip is
+        deferred (the accumulator is bled down instead) so at least one
+        open patch always remains productive. This is the explicit
+        anti-freeze / anti-total-collapse guard.
+        """
+        open_indices = [
+            i for i in range(self.north_hotspot_count) if not self.hotspot_state[i]["gorilla_occupied"]
+        ]
+
+        for index in open_indices:
+            state = self.hotspot_state[index]
+
+            if state["depleted"]:
+                state["recovery_timer"] -= 1
+                if state["recovery_timer"] <= 0:
+                    state["depleted"] = False
+                    state["recovery_timer"] = 0
+                    state["consumed_accumulator"] = 0.0
+                continue
+
+            if state["consumed_accumulator"] >= self.depletion_threshold:
+                currently_productive_open = [
+                    i for i in open_indices if not self.hotspot_state[i]["depleted"]
+                ]
+                # Safety floor: never let the last productive open hotspot
+                # go dark. If this is the only one left, don't deplete it;
+                # just relieve some accumulated pressure so it can trip
+                # later once another patch has recovered.
+                if len(currently_productive_open) <= 1:
+                    state["consumed_accumulator"] = self.depletion_threshold * 0.5
+                    continue
+
+                state["depleted"] = True
+                state["recovery_timer"] = self.depletion_recovery_steps
 
     def _spawn_south_food(self) -> None:
         """Abundance spawn logic for the South Bank (Bonobo territory).
@@ -414,12 +641,15 @@ class CongoEcosystem:
     def step(self) -> None:
         """Advance the ecosystem by one simulation tick.
 
-        Runs the resource spawning engine for both banks independently
-        (scarcity scatter spawn on the North, abundance cluster spawn on
-        the South) and increments the internal step counter.
+        Runs the resource spawning engine for both banks (state-aware
+        patchy spawn on the North, abundance cluster spawn on the South),
+        advances the North patch depletion/recovery cycle, and
+        increments the internal step counter.
         """
         self._spawn_north_food()
+        self._spawn_midway_food()
         self._spawn_south_food()
+        self._update_hotspot_depletion()
         self.current_step += 1
 
     # ------------------------------------------------------------------

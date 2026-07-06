@@ -74,28 +74,35 @@ def build_arena(rng_seed: int = 2026) -> CongoArena:
         width=50,
         height=50,
         river_y=25,
-        north_spawn_prob=0.25,             # now evaluated PER HOTSPOT, independently, each step
+        north_spawn_prob=0.55,             # raised: only 2 of 4 patches are open (gorillas hold 2),
+                                           # so open patches must produce more to feed the population
         south_spawn_prob=0.50,
-        north_food_energy=35.0,            # boosted: one hotspot meal now dwarfs the -10 ATTACK cost
+        north_food_energy=35.0,            # boosted: one hotspot meal dwarfs the -10 ATTACK cost
         south_food_energy=40.0,
         south_cluster_size_range=(2, 4),
         south_cluster_radius=2,
-        north_hotspot_count=4,             # still only 4 dense choke-points in all of North territory
+        north_hotspot_count=4,             # 4 choke-points: 2 gorilla-held + 2 open/contested
         north_hotspot_radius=3,
-        north_hotspot_spawn_size=(3, 6),   # denser per-firing-hotspot drop
-        south_isolated_fruit_chance=0.30,  # South stays broadly uniform/stable
+        north_hotspot_spawn_size=(4, 8),   # dense per-firing drop, offsetting the halved patch count
+        south_isolated_fruit_chance=0.30,  # South stays broadly uniform/stable (no gorillas)
+        gorilla_occupied_count=2,          # 2 richest spots permanently held by silverback troops
+        depletion_threshold=800.0,         # open patches are the ONLY food, so exhaust them slowly
+        depletion_recovery_steps=20,       # short dark period so a depleted patch returns quickly
+        midway_food_prob=0.15,             # sparse: travel snacks appear on only ~15% of steps
+        midway_food_energy=4.0,            # low-value filler (~1/9 of a real hotspot meal at 35)
+        midway_food_max_per_step=2,        # at most 2 snacks/step -> corridor stays lean, not a patch
         rng_seed=rng_seed,
     )
     genetic_engine = GeneticEngine(
         reproduction_energy_threshold=65.0,
-        reproduction_cost=20.0,
+        reproduction_cost=22.0,
         crossover_weight_parent1=0.6,
         mutation_rate=0.05,
         mutation_sigma=0.05,
         offspring_initial_energy=50.0,
         mating_max_distance=1,
-        north_hotspot_fertility_threshold=50.0,  # North breeds faster/cheaper while IN a hotspot
-        north_hotspot_reproduction_cost=12.0,
+        north_hotspot_fertility_threshold=45.0,  # North breeds while holding an open patch
+        north_hotspot_reproduction_cost=18.0,
         low_population_threshold=5,   # <=5 total agents alive -> "crisis" mate-seeking mode
         low_population_mating_distance=15,  # dramatically widened search range in a crisis
     )
@@ -109,13 +116,23 @@ def build_arena(rng_seed: int = 2026) -> CongoArena:
         interaction_resolver=interaction_resolver,
         max_steps=None,
         rng_seed=rng_seed,
-        foraging_radius=4,
-        food_seeking_bias=0.85,
-        initial_north_population=80,      # explicit calibrated counts, not a ratio-of-total
+        initial_north_population=30,      # sized to grow into the 2 open patches, not shock-collapse
         initial_south_population=60,
-        north_max_age_range=(150, 250),   # short, stress/combat-worn lifespan
+        north_max_age_range=(200, 350),   # stress/combat-worn, but long enough to reproduce first
         south_max_age_range=None,         # aging disabled entirely for the stable Bonobo population
-        north_clan_spawn_radius=6,        # troupe starts living AROUND its hotspot, not scattered
+        north_clan_spawn_radius=5,        # troupe starts living AROUND its open hotspot
+        gorilla_stress_penalty=15.0,      # meaningful stress hit, not an instant death sentence
+        gorilla_energy_penalty=1.0,       # light energy cost of being chased off
+        north_birth_dispersal_radius=6,   # newborn Chimps scatter (fission), breaking super-colonies
+        crowding_radius=3,                # neighborhood size for measuring local density
+        crowding_soft_cap=8,              # crowd beyond this starts adding soft stress (no direct death)
+        crowding_stress_per_excess=1.5,   # stress added per agent over the soft cap
+        crowding_migration_trigger=10,    # local crowd at/above this makes an agent seek another patch
+        migration_vision_radius=45,       # must exceed inter-hotspot distance (~27) so the OTHER open
+                                          # patch is always visible to migrate to; grid is 50 wide, so
+                                          # 45 covers essentially any North hotspot pair
+        foraging_radius=5,
+        food_seeking_bias=0.9,
     )
     return arena
 

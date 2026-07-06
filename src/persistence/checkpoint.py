@@ -67,6 +67,13 @@ class CheckpointManager:
                 "north_hotspot_spawn_size": list(ecosystem.north_hotspot_spawn_size),
                 "north_hotspots": [list(coord) for coord in ecosystem.north_hotspots],
                 "south_isolated_fruit_chance": ecosystem.south_isolated_fruit_chance,
+                "gorilla_occupied_count": ecosystem.gorilla_occupied_count,
+                "depletion_threshold": ecosystem.depletion_threshold,
+                "depletion_recovery_steps": ecosystem.depletion_recovery_steps,
+                "midway_food_prob": ecosystem.midway_food_prob,
+                "midway_food_energy": ecosystem.midway_food_energy,
+                "midway_food_max_per_step": ecosystem.midway_food_max_per_step,
+                "hotspot_state": [dict(s) for s in ecosystem.hotspot_state],
                 "food_items": [
                     {"x": item.x, "y": item.y, "food_type": item.food_type, "energy": item.energy}
                     for item in ecosystem.food_items
@@ -162,6 +169,12 @@ class CheckpointManager:
             north_hotspot_radius=eco_data.get("north_hotspot_radius", 3),
             north_hotspot_spawn_size=tuple(eco_data.get("north_hotspot_spawn_size", (1, 3))),
             south_isolated_fruit_chance=eco_data.get("south_isolated_fruit_chance", 0.30),
+            gorilla_occupied_count=eco_data.get("gorilla_occupied_count", 2),
+            depletion_threshold=eco_data.get("depletion_threshold", 400.0),
+            depletion_recovery_steps=eco_data.get("depletion_recovery_steps", 40),
+            midway_food_prob=eco_data.get("midway_food_prob", 0.15),
+            midway_food_energy=eco_data.get("midway_food_energy", 4.0),
+            midway_food_max_per_step=eco_data.get("midway_food_max_per_step", 2),
             rng_seed=rng_seed,
         )
         # The constructor already generated a fresh, randomized set of
@@ -171,6 +184,11 @@ class CheckpointManager:
         # not just statistically similar.
         if "north_hotspots" in eco_data:
             ecosystem.north_hotspots = [tuple(coord) for coord in eco_data["north_hotspots"]]
+        # Restore per-hotspot dynamic state (gorilla flags, depletion,
+        # recovery timers) so a resumed run continues the exact same patch
+        # cycle rather than resetting every patch to fresh.
+        if "hotspot_state" in eco_data:
+            ecosystem.hotspot_state = [dict(s) for s in eco_data["hotspot_state"]]
 
         for item in eco_data["food_items"]:
             ecosystem.add_food(

@@ -35,12 +35,20 @@ class FoodItem:
 
     Multiple FoodItem instances may share the exact same (x, y)
     coordinate, since the ecosystem grid supports multi-occupancy.
+
+    `spawn_step` records the ecosystem step at which the item appeared,
+    used to compute its age for the decay/rot mechanic (uneaten food
+    fades and eventually disappears, mirroring real fruit rotting on the
+    forest floor — e.g. under a gorilla-guarded grove chimps can't reach).
+    Defaults to 0 for backward compatibility with any code (or old
+    checkpoint) that constructs a FoodItem without an explicit step.
     """
 
     x: int
     y: int
     food_type: BankType
     energy: float
+    spawn_step: int = 0
 
     def as_tuple(self) -> Tuple[int, int, BankType, float]:
         """Return a plain tuple representation of this food item."""
@@ -120,6 +128,19 @@ class CongoEcosystem:
         midway_food_max_per_step: Upper bound on travel-snack items spawned
                                     per triggered step, keeping the
                                     corridor sparse.
+        food_decay_steps: Number of steps an uneaten food item survives
+                           before it rots and is removed from the grid.
+                           Models real fruit rotting where it falls when
+                           nobody can (or dares) eat it — e.g. under a
+                           gorilla-guarded grove, or in a rival-clan
+                           no-man's-land, or a mast-fruiting glut too big
+                           for a small population to finish. Set high
+                           enough (default 100) that normal foraging and
+                           corridor migration are unaffected — only
+                           genuinely abandoned food actually rots — while
+                           still clearing the perpetual pile-up of
+                           unreachable food that would otherwise
+                           accumulate without bound.
     """
 
     def __init__(
@@ -140,9 +161,13 @@ class CongoEcosystem:
         gorilla_occupied_count: int = 2,
         depletion_threshold: float = 400.0,
         depletion_recovery_steps: int = 40,
+        gorilla_forage_rate: float = 3.0,
+        gorilla_migration_threshold: float = 600.0,
+        gorilla_min_residence_steps: int = 150,
         midway_food_prob: float = 0.15,
         midway_food_energy: float = 4.0,
         midway_food_max_per_step: int = 2,
+        food_decay_steps: int = 100,
         rng_seed: Optional[int] = None,
     ) -> None:
         if width <= 0 or height <= 0:
@@ -176,9 +201,13 @@ class CongoEcosystem:
         self.gorilla_occupied_count = gorilla_occupied_count
         self.depletion_threshold = depletion_threshold
         self.depletion_recovery_steps = depletion_recovery_steps
+        self.gorilla_forage_rate = gorilla_forage_rate
+        self.gorilla_migration_threshold = gorilla_migration_threshold
+        self.gorilla_min_residence_steps = gorilla_min_residence_steps
         self.midway_food_prob = midway_food_prob
         self.midway_food_energy = midway_food_energy
         self.midway_food_max_per_step = midway_food_max_per_step
+        self.food_decay_steps = food_decay_steps
 
         self._rng = random.Random(rng_seed)
 
@@ -225,12 +254,17 @@ class CongoEcosystem:
     def _init_hotspot_state(self) -> List[dict]:
         """Initialize per-hotspot dynamic state.
 
-        The first `gorilla_occupied_count` hotspots are flagged as
-        permanent gorilla territory ("the reserved spots"); the rest are
-        open, contested, and subject to the depletion cycle ("the
-        hard-to-reach leftovers"). Which specific hotspots are gorilla
-        territory is stable for the life of the ecosystem — a silverback
-        troop's home range doesn't wander day to day.
+        The first `gorilla_occupied_count` hotspots START as gorilla
+        territory ("the reserved spots"); the rest are open, contested,
+        and subject to the depletion cycle ("the hard-to-reach
+        leftovers"). Unlike the earlier static design, gorilla occupancy
+        is no longer fixed for the whole run: a resident troop gradually
+        exhausts the ground food at its patch, and once that patch is
+        depleted enough, the troop migrates to the richest currently-open
+        patch (see `_update_gorilla_migration`) — mirroring real gorillas
+        as foraging nomads. `gorilla_residence_steps` tracks how long the
+        current troop has sat on a patch (used to enforce a minimum stay
+        so troops don't thrash between patches every few steps).
         """
         state = []
         for index in range(self.north_hotspot_count):
@@ -240,6 +274,8 @@ class CongoEcosystem:
                     "depleted": False,
                     "recovery_timer": 0,
                     "consumed_accumulator": 0.0,
+                    "gorilla_residence_steps": 0,
+                    "gorilla_forage_accumulator": 0.0,
                 }
             )
         return state
@@ -328,11 +364,23 @@ class CongoEcosystem:
         self.current_step = 0
         self.hotspot_state = self._init_hotspot_state()
 
-    def add_food(self, x: int, y: int, food_type: BankType, energy: float) -> FoodItem:
+    def add_food(
+        self,
+        x: int,
+        y: int,
+        food_type: BankType,
+        energy: float,
+        spawn_step: Optional[int] = None,
+    ) -> FoodItem:
         """Add a single food item to the grid at (x, y).
 
         Multiple food items may coexist at the same coordinate; this
         method does not check for or prevent overlap.
+
+        `spawn_step` defaults to the ecosystem's current step (so newly
+        spawned food is stamped "fresh now"); a caller such as
+        CheckpointManager.load can pass the item's original spawn step to
+        preserve its exact remaining freshness across a save/restore.
 
         Raises:
             ValueError: If (x, y) is outside the hard grid boundaries.
@@ -340,7 +388,8 @@ class CongoEcosystem:
         if not self.is_within_bounds(x, y):
             raise ValueError(f"Cannot place food at out-of-bounds coordinate ({x}, {y}).")
 
-        item = FoodItem(x=x, y=y, food_type=food_type, energy=energy)
+        stamp = self.current_step if spawn_step is None else spawn_step
+        item = FoodItem(x=x, y=y, food_type=food_type, energy=energy, spawn_step=stamp)
         self.food_items.append(item)
         return item
 
@@ -575,6 +624,89 @@ class CongoEcosystem:
                 state["depleted"] = True
                 state["recovery_timer"] = self.depletion_recovery_steps
 
+    def _update_gorilla_migration(self, chimp_positions: Optional[List[Tuple[int, int]]] = None) -> None:
+        """Move each gorilla troop off an exhausted patch to a richer one.
+
+        Resource-driven migration (not a fixed timer): every step, each
+        gorilla-occupied patch accrues `gorilla_forage_rate` into its
+        `gorilla_forage_accumulator` — the troop steadily eating down the
+        ground vegetation it sits on — and ages its residence counter.
+        Once a troop has both stayed at least `gorilla_min_residence_steps`
+        (so troops don't thrash) AND foraged past
+        `gorilla_migration_threshold` (the patch is now exhausted), the
+        troop stands up and relocates.
+
+        Destination choice balances two real pressures: gorillas head for
+        fresh, unexploited forage (open patch with the LOWEST recent chimp
+        consumption = most standing food), but they also avoid walking
+        into a dense crowd of chimps — real silverbacks don't seek
+        confrontation, they drift toward quiet ground. So among gorilla-
+        free, non-depleted patches we pick the one minimizing a combined
+        score of (recent depletion) + (current chimp crowding). This
+        avoids the failure mode where a troop teleports directly on top of
+        the whole chimp colony and displaces everyone at once, crashing
+        the North population in a single step.
+
+        `chimp_positions` (optional) is the list of current North-agent
+        (x, y) tuples, supplied by the arena so crowding can be measured;
+        if omitted, only the resource term is used.
+
+        Invariant preserved: the number of gorilla-occupied patches never
+        changes, so `gorilla_occupied_count` open patches always remain.
+        """
+        if self.gorilla_occupied_count <= 0:
+            return
+
+        occupied = [i for i in range(self.north_hotspot_count) if self.hotspot_state[i]["gorilla_occupied"]]
+
+        for index in occupied:
+            state = self.hotspot_state[index]
+            state["gorilla_residence_steps"] += 1
+            state["gorilla_forage_accumulator"] += self.gorilla_forage_rate
+
+            ready_to_move = (
+                state["gorilla_residence_steps"] >= self.gorilla_min_residence_steps
+                and state["gorilla_forage_accumulator"] >= self.gorilla_migration_threshold
+            )
+            if not ready_to_move:
+                continue
+
+            candidates = [
+                i
+                for i in range(self.north_hotspot_count)
+                if not self.hotspot_state[i]["gorilla_occupied"] and not self.hotspot_state[i]["depleted"]
+            ]
+            if not candidates:
+                state["gorilla_forage_accumulator"] = self.gorilla_migration_threshold
+                continue
+
+            def _crowd_at(patch_index: int) -> int:
+                if not chimp_positions:
+                    return 0
+                hx, hy = self.north_hotspots[patch_index]
+                r = self.north_hotspot_radius
+                return sum(1 for (cx, cy) in chimp_positions if max(abs(cx - hx), abs(cy - hy)) <= r)
+
+            # Combined cost: prefer fresh forage (low consumed_accumulator)
+            # AND few chimps (crowd heavily weighted so the troop actively
+            # avoids barging into the colony). Lower is better.
+            def _cost(patch_index: int) -> float:
+                return self.hotspot_state[patch_index]["consumed_accumulator"] + 50.0 * _crowd_at(patch_index)
+
+            destination = min(candidates, key=_cost)
+
+            state["gorilla_occupied"] = False
+            state["gorilla_residence_steps"] = 0
+            state["gorilla_forage_accumulator"] = 0.0
+
+            dest_state = self.hotspot_state[destination]
+            dest_state["gorilla_occupied"] = True
+            dest_state["gorilla_residence_steps"] = 0
+            dest_state["gorilla_forage_accumulator"] = 0.0
+            dest_state["depleted"] = False
+            dest_state["recovery_timer"] = 0
+            dest_state["consumed_accumulator"] = 0.0
+
     def _spawn_south_food(self) -> None:
         """Abundance spawn logic for the South Bank (Bonobo territory).
 
@@ -638,19 +770,54 @@ class CongoEcosystem:
                 energy=self.south_food_energy,
             )
 
-    def step(self) -> None:
+    def step(self, chimp_positions: Optional[List[Tuple[int, int]]] = None) -> None:
         """Advance the ecosystem by one simulation tick.
 
         Runs the resource spawning engine for both banks (state-aware
         patchy spawn on the North, abundance cluster spawn on the South),
-        advances the North patch depletion/recovery cycle, and
-        increments the internal step counter.
+        advances the North patch depletion/recovery cycle and the gorilla
+        troops' resource-driven migration, increments the internal step
+        counter, and finally rots away any food that has sat uneaten past
+        `food_decay_steps`.
+
+        `chimp_positions` (optional list of North-agent (x, y) tuples) lets
+        the gorilla-migration destination logic avoid relocating a troop
+        straight onto a dense chimp colony; the arena supplies it.
         """
         self._spawn_north_food()
         self._spawn_midway_food()
         self._spawn_south_food()
         self._update_hotspot_depletion()
+        self._update_gorilla_migration(chimp_positions)
         self.current_step += 1
+        self._decay_food()
+
+    def _decay_food(self) -> None:
+        """Remove food items that have sat uneaten longer than `food_decay_steps`.
+
+        Runs after the step counter increments, so a just-spawned item
+        (age 0) is never removed on the same tick it appeared. A
+        non-positive `food_decay_steps` disables decay entirely.
+        """
+        if self.food_decay_steps <= 0:
+            return
+        cutoff = self.current_step - self.food_decay_steps
+        # Keep items whose spawn_step is still newer than the cutoff.
+        self.food_items = [item for item in self.food_items if item.spawn_step > cutoff]
+
+    def get_food_freshness(self, item: FoodItem) -> float:
+        """Return an item's remaining freshness as a fraction in [0.0, 1.0].
+
+        1.0 = just spawned, 0.0 = about to rot. Intended for the renderer
+        to fade food color (fresh -> aging -> rotting) as it ages. If decay
+        is disabled (`food_decay_steps <= 0`), everything reads as fully
+        fresh (1.0).
+        """
+        if self.food_decay_steps <= 0:
+            return 1.0
+        age = self.current_step - item.spawn_step
+        remaining = 1.0 - (age / self.food_decay_steps)
+        return max(0.0, min(1.0, remaining))
 
     # ------------------------------------------------------------------
     # Convenience / introspection

@@ -77,6 +77,10 @@ class CongoArena:
         crowding_stress_per_excess: float = 1.5,
         crowding_migration_trigger: int = 12,
         migration_vision_radius: int = 25,
+        north_gene_means: Tuple[float, float] = (1.2, 0.85),
+        south_gene_means: Tuple[float, float] = (0.85, 0.30),
+        north_reproduction_cooldown: int = 20,
+        south_reproduction_cooldown: int = 60,
     ) -> None:
         """Construct a CongoArena.
 
@@ -191,6 +195,24 @@ class CongoArena:
         self.crowding_stress_per_excess = crowding_stress_per_excess
         self.crowding_migration_trigger = crowding_migration_trigger
         self.migration_vision_radius = migration_vision_radius
+        # Per-bank (g_size, g_fertility) gene means. North chimps are
+        # heavier (costlier metabolism, stronger combat) and high-fertility
+        # (fast breeders); South bonobos are lighter (cheap metabolism) and
+        # low-fertility (slow, selective breeders). Individual agents are
+        # drawn with small jitter around these means so selection has
+        # variation to act on.
+        self.north_gene_means = north_gene_means
+        self.south_gene_means = south_gene_means
+        # Per-bank inter-birth interval. North (chimp) uses a SHORT
+        # cooldown: it's a high-mortality, r-selected "breed fast to
+        # replace losses" strategy, and a long cooldown starves its
+        # recovery so deaths outpace births. South (bonobo) uses a LONG
+        # cooldown: a low-mortality, K-selected strategy where the long
+        # interval damps booms toward a stable logistic equilibrium.
+        # (Assigned per-parent by bank at birth-time, mirroring how
+        # max_age is a bank/ecology concern rather than a genetics one.)
+        self.north_reproduction_cooldown = max(0, int(north_reproduction_cooldown))
+        self.south_reproduction_cooldown = max(0, int(south_reproduction_cooldown))
 
         # Per-step caches (populated during step(); initialized here so
         # any early access is safe).
@@ -326,6 +348,7 @@ class CongoArena:
 
         resolved_bank = bank if bank is not None else self.ecosystem.get_bank(y)
         max_age = self._draw_max_age_for_bank(resolved_bank)
+        g_size, g_fertility = self._draw_genes_for_bank(resolved_bank)
 
         agent = EvolvableAgent(
             agent_id=agent_id,
@@ -335,6 +358,8 @@ class CongoArena:
             initial_energy=initial_energy,
             generation=generation,
             max_age=max_age,
+            g_size=g_size,
+            g_fertility=g_fertility,
             rng=self._rng,
         )
         self.agents_by_id[agent_id] = agent
@@ -353,6 +378,24 @@ class CongoArena:
             return None
         low, high = age_range
         return self._rng.randint(low, high)
+
+    def _draw_genes_for_bank(self, bank: str) -> Tuple[float, float]:
+        """Draw (g_size, g_fertility) for a newly-spawned agent by bank.
+
+        North (chimpanzee): larger-bodied (higher metabolic cost, stronger
+        in combat) and high-fertility (fast, alpha-driven breeding).
+        South (bonobo): lighter-bodied (cheaper metabolism) and
+        low-fertility (slow, selective, socially-gated breeding). A small
+        random jitter around each mean seeds genetic diversity so
+        selection and mutation have variation to act on.
+        """
+        if bank == "north":
+            size_mean, fert_mean = self.north_gene_means
+        else:
+            size_mean, fert_mean = self.south_gene_means
+        g_size = max(0.5, min(1.6, size_mean + self._rng.gauss(0.0, 0.05)))
+        g_fertility = max(0.0, min(1.0, fert_mean + self._rng.gauss(0.0, 0.05)))
+        return g_size, g_fertility
 
     def reset(self, seed: Optional[int] = None) -> Dict[str, dict]:
         """Reset the ecosystem and spawn a fresh initial population.
@@ -513,6 +556,8 @@ class CongoArena:
             if not agent.is_alive:
                 continue
             agent.increment_age()
+            # Count down the inter-birth interval each tick.
+            agent.tick_reproduction_cooldown()
             if agent.is_expired():
                 agent.is_alive = False
                 log.append(
@@ -566,38 +611,58 @@ class CongoArena:
             log.extend(pair_log)
 
         # --- 4. Individual resolution phase ---
+        # Per-bank living counts, computed once, so a fertile agent in a
+        # crashed bank can be routed toward a mate (mate-seeking) exactly
+        # like an overcrowded agent is routed toward an emptier patch.
+        north_pop = self._bank_population("north")
+        south_pop = self._bank_population("south")
+        low_pop_threshold = self.genetic_engine.low_population_threshold
+
         for aid in living_ids:
             agent = self.agents_by_id[aid]
             if not agent.is_alive or suppress.get(aid, False):
                 continue
 
-            # If this North agent is severely overcrowded, hand its move a
-            # migration target: the nearest reachable open hotspot it can
-            # "see" with its long-range migration vision. This turns the
-            # crowding stress into a directed exodus toward real, less
-            # contested food instead of a blind scatter into empty desert.
-            migration_target = None
-            crowd = self._local_crowd_cache.get(aid)
-            if crowd is not None and crowd >= self.crowding_migration_trigger:
-                migration_target = self._nearest_open_hotspot(agent)
+            # Movement target resolution, in priority order:
+            #   (a) mate-seeking: if this agent's OWN bank has crashed to
+            #       <= low_pop_threshold and the agent is a ready breeder,
+            #       steer it toward the nearest fertile partner so the
+            #       widened low-population mating range yields real
+            #       encounters instead of two survivors wandering a huge
+            #       empty bank forever.
+            #   (b) migration: else, if severely overcrowded (North), steer
+            #       toward the nearest reachable open hotspot.
+            move_target = None
+            agent_bank = self.ecosystem.get_bank(agent.y)
+            bank_pop = north_pop if agent_bank == "north" else south_pop
+            is_ready_breeder = (
+                self.genetic_engine.is_fertile(agent, self._reproduction_threshold_for(agent))
+                and not agent.is_on_reproduction_cooldown()
+            )
+            if bank_pop <= low_pop_threshold and is_ready_breeder:
+                move_target = self._nearest_fertile_partner(agent)
+
+            if move_target is None:
+                crowd = self._local_crowd_cache.get(aid)
+                if crowd is not None and crowd >= self.crowding_migration_trigger:
+                    move_target = self._nearest_open_hotspot(agent)
 
             action = chosen[aid]
-            # A migrating agent commits to moving toward the target patch.
-            # Its fuzzy brain, stressed by crowding, will often pick
-            # ATTACK/COOPERATE — but if there's no agent actually on its
-            # cell to act on, those are wasted no-ops that leave it drifting
-            # instead of migrating. So when migrating: redirect EAT/IDLE
+            # A steering agent (mate-seeking OR migrating) commits to moving
+            # toward its target. Its fuzzy brain may pick ATTACK/COOPERATE —
+            # but if there's no agent actually on its cell to act on, those
+            # are wasted no-ops that leave it drifting instead of closing
+            # the distance. So when steering: redirect EAT/IDLE
             # unconditionally, and redirect ATTACK/COOPERATE too UNLESS
             # someone is genuinely co-located (a real fight/alliance we
-            # shouldn't cancel). This makes the migration target actually
-            # pull the agent out of the mob toward the emptier patch.
-            if migration_target is not None:
+            # shouldn't cancel).
+            if move_target is not None:
                 if action in (ActionType.EAT, ActionType.IDLE):
                     action = ActionType.MOVE
                 elif action in (ActionType.ATTACK, ActionType.COOPERATE) and not self._has_colocated_agent(agent):
                     action = ActionType.MOVE
 
-            self._apply_individual_action(agent, action, migration_target=migration_target)
+            self._apply_individual_action(agent, action, migration_target=move_target)
 
         # --- 4b. Gorilla-displacement phase ---
         # After movement resolves, any chimp now standing inside a
@@ -611,7 +676,14 @@ class CongoArena:
         log.extend(self._apply_gorilla_displacement(living_ids))
 
         # --- 5. Ecosystem tick ---
-        self.ecosystem.step()
+        # Supply current North chimp positions so migrating gorilla troops
+        # can avoid relocating straight onto a dense chimp colony.
+        chimp_positions = [
+            (a.x, a.y)
+            for a in self.agents_by_id.values()
+            if a.is_alive and self.ecosystem.get_bank(a.y) == "north"
+        ]
+        self.ecosystem.step(chimp_positions=chimp_positions)
 
         # --- 6. Reproduction phase ---
         log.extend(self._process_reproduction(chosen))
@@ -844,6 +916,50 @@ class CongoArena:
                 total += density_map.get((agent.x + dx, agent.y + dy), 0)
         return total
 
+    def _bank_population(self, bank: str) -> int:
+        """Count living agents currently on the given bank."""
+        return sum(
+            1
+            for a in self.agents_by_id.values()
+            if a.is_alive and self.ecosystem.get_bank(a.y) == bank
+        )
+
+    def _nearest_fertile_partner(self, agent: EvolvableAgent) -> Optional[Tuple[int, int]]:
+        """Return the coordinate of the nearest eligible mating partner for
+        `agent`, searched within `low_population_mating_distance` and
+        restricted to the SAME bank (the river is an impassable divide).
+
+        A valid partner must be a different living agent, energy-fertile,
+        not on reproduction cooldown, and not currently overlapping this
+        agent's own cell (if they already share a cell, they don't need to
+        move toward each other). This is the "mate-seeking compass": when a
+        bank's population has crashed, its fertile survivors actively steer
+        toward one another instead of wandering blindly, which is what
+        actually lets the wide low-population mating distance translate into
+        real encounters and births.
+        """
+        my_bank = self.ecosystem.get_bank(agent.y)
+        search_radius = self.genetic_engine.low_population_mating_distance
+
+        best_coord: Optional[Tuple[int, int]] = None
+        best_distance: Optional[int] = None
+        for other in self.agents_by_id.values():
+            if other.agent_id == agent.agent_id or not other.is_alive:
+                continue
+            if self.ecosystem.get_bank(other.y) != my_bank:
+                continue
+            if not self.genetic_engine.is_fertile(other, self._reproduction_threshold_for(other)):
+                continue
+            if other.is_on_reproduction_cooldown():
+                continue
+            distance = max(abs(other.x - agent.x), abs(other.y - agent.y))
+            if distance == 0 or distance > search_radius:
+                continue
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_coord = (other.x, other.y)
+        return best_coord
+
     def _nearest_open_hotspot(self, agent: EvolvableAgent) -> Optional[Tuple[int, int]]:
         """Return the coordinate of the nearest non-gorilla, non-depleted
         North hotspot within `migration_vision_radius`, excluding the one
@@ -965,6 +1081,16 @@ class CongoArena:
             return self.genetic_engine.north_hotspot_reproduction_cost
         return None
 
+    def _reproduction_cooldown_for(self, agent: EvolvableAgent) -> int:
+        """Return the post-birth cooldown (inter-birth interval) for `agent`'s bank.
+
+        North (chimp) recovers fast (short cooldown) to replace its high
+        losses; South (bonobo) stays damped (long cooldown) for stability.
+        """
+        if self.ecosystem.get_bank(agent.y) == "north":
+            return self.north_reproduction_cooldown
+        return self.south_reproduction_cooldown
+
     def _compute_child_position(self, parent: EvolvableAgent) -> Tuple[int, int]:
         """Decide where a newborn spawns relative to its parent.
 
@@ -1006,7 +1132,17 @@ class CongoArena:
         log: List[str] = []
 
         living = [a for a in self.agents_by_id.values() if a.is_alive]
-        current_population = len(living)
+        # Per-bank counts: a bank's own crash must trigger its own rescue
+        # rules, even if the OTHER bank is healthy and the total looks fine.
+        # (This was the South-extinction bug: South collapsed to 2 while a
+        # healthy North kept the total above the threshold, so neither the
+        # mating-distance boost nor the conception guarantee ever engaged.)
+        north_pop = sum(1 for a in living if self.ecosystem.get_bank(a.y) == "north")
+        south_pop = len(living) - north_pop
+
+        def bank_pop_for(agent: EvolvableAgent) -> int:
+            return north_pop if self.ecosystem.get_bank(agent.y) == "north" else south_pop
+
         fertile_sorted = sorted(
             (
                 a
@@ -1029,6 +1165,11 @@ class CongoArena:
                 action1 = chosen_actions.get(parent1.agent_id)
                 action2 = chosen_actions.get(parent2.agent_id)
 
+                # Use the SMALLER of the two parents' bank populations for
+                # the low-population rules (in practice both parents are on
+                # the same bank, since the river blocks cross-bank mating).
+                pair_bank_pop = min(bank_pop_for(parent1), bank_pop_for(parent2))
+
                 can_mate = self.genetic_engine.can_mate(
                     parent1,
                     parent2,
@@ -1036,10 +1177,23 @@ class CongoArena:
                     action2,
                     threshold1=self._reproduction_threshold_for(parent1),
                     threshold2=self._reproduction_threshold_for(parent2),
-                    current_population=current_population,
+                    current_population=pair_bank_pop,
                 )
                 if not can_mate:
                     continue
+
+                # Fertility-strategy gate: the pair is eligible, but whether
+                # conception actually happens is rolled against the parents'
+                # g_fertility genes — UNLESS that parent's own bank has
+                # crashed to <= low_population_threshold, in which case
+                # conception is guaranteed so a near-extinct bank isn't also
+                # fighting the fertility dice. A failed roll marks both as
+                # "used" this step (they attempted) but produces no child.
+                low_pop = pair_bank_pop <= self.genetic_engine.low_population_threshold
+                if not low_pop and not self.genetic_engine.roll_conception(parent1, parent2):
+                    used_ids.add(parent1.agent_id)
+                    used_ids.add(parent2.agent_id)
+                    break
 
                 child_position = self._compute_child_position(parent1)
                 child = self.genetic_engine.reproduce(
@@ -1064,6 +1218,17 @@ class CongoArena:
                     parent2, self._reproduction_cost_for(parent2)
                 )
 
+                # Inter-birth interval: each parent enters a cooldown sized
+                # to ITS OWN bank — North chimps recover fast (short), South
+                # bonobos stay damped (long) — so neither can conceive again
+                # until its interval elapses.
+                p1_cd = self._reproduction_cooldown_for(parent1)
+                p2_cd = self._reproduction_cooldown_for(parent2)
+                if p1_cd > 0:
+                    parent1.reproduction_cooldown = p1_cd
+                if p2_cd > 0:
+                    parent2.reproduction_cooldown = p2_cd
+
                 used_ids.add(parent1.agent_id)
                 used_ids.add(parent2.agent_id)
 
@@ -1071,7 +1236,8 @@ class CongoArena:
                     f"REPRODUCTION: Agent {parent1.agent_id} x Agent {parent2.agent_id} "
                     f"-> offspring Agent {child.agent_id} "
                     f"(generation {child.generation}, bank={child_bank}, "
-                    f"max_age={child.max_age}, G_T={child.g_t:.3f}, G_E={child.g_e:.3f})"
+                    f"max_age={child.max_age}, G_T={child.g_t:.3f}, G_E={child.g_e:.3f}, "
+                    f"size={child.g_size:.2f}, fert={child.g_fertility:.2f})"
                 )
                 break  # parent1 has mated this step; move to the next candidate.
 

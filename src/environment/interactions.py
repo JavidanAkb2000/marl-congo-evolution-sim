@@ -180,8 +180,14 @@ class InteractionResolver:
         self._apply_damage(a1, self.COMBAT_ENERGY_LOSS)
         self._apply_damage(a2, self.COMBAT_ENERGY_LOSS)
 
-        gene_sum = a1.g_t + a2.g_t
-        win_prob_a1 = a1.g_t / gene_sum if gene_sum > 0 else 0.5
+        # Combat strength combines aggression (g_t) and body size
+        # (g_size): a bigger, more aggressive agent wins more often. Using
+        # the product means a heavy chimp has a real edge over a light
+        # bonobo of equal aggression, reflecting mass advantage in a fight.
+        strength_a1 = a1.g_t * a1.g_size
+        strength_a2 = a2.g_t * a2.g_size
+        strength_sum = strength_a1 + strength_a2
+        win_prob_a1 = strength_a1 / strength_sum if strength_sum > 0 else 0.5
         winner, loser = (a1, a2) if self._rng.random() < win_prob_a1 else (a2, a1)
 
         log: List[str] = [

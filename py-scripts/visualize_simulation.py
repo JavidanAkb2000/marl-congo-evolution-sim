@@ -79,6 +79,20 @@ COLOR_RIVER = (30, 144, 255)
 
 COLOR_FOOD_CORE = (255, 250, 210)
 COLOR_FOOD_GLOW = (255, 215, 0)
+# Food decay/rot color stages: fresh (yellow) -> aging (orange) -> rotting (red).
+COLOR_FOOD_FRESH = (255, 215, 0)     # yellow-gold, just spawned
+COLOR_FOOD_AGING = (255, 140, 0)     # orange, roughly half-aged
+COLOR_FOOD_ROTTING = (220, 40, 40)   # red, about to disappear
+
+# Gorilla territory: a dark, massive "impassable" block on the reserved
+# hotspots. Semi-transparent fill so rotting food still shows THROUGH it
+# (the whole point — chimps can't reach it, so it visibly rots on top of
+# the gorilla mass), plus a light-grey outline so the block reads clearly
+# against both the tan savanna background and the red of rotting food.
+COLOR_GORILLA_FILL = (35, 35, 40)          # near-black dark grey (RGB base)
+COLOR_GORILLA_FILL_ALPHA = 200             # mostly opaque, but lets food peek through
+COLOR_GORILLA_OUTLINE = (150, 150, 160)    # light grey border for clear separation
+COLOR_GORILLA_ICON = (15, 15, 18)          # even darker centre "core" mass
 
 # Gene-based agent color gradient anchors.
 GENE_COLOR_COOPERATIVE = (0, 200, 120)   # G_T -> 0.0 : vibrant emerald green
@@ -330,14 +344,125 @@ class SimulationRenderer:
         border_rect = pygame.Rect(GRID_ORIGIN[0], GRID_ORIGIN[1], GRID_PIXEL_WIDTH, GRID_PIXEL_HEIGHT)
         pygame.draw.rect(self.screen, COLOR_HUD_PANEL_BORDER, border_rect, width=2)
 
+    @staticmethod
+    def _freshness_color(freshness: float) -> Tuple[int, int, int]:
+        """Map freshness in [0,1] to a color: 1.0 yellow -> 0.5 orange -> 0.0 red.
+
+        Piecewise-linear through the orange midpoint so the three decay
+        stages (fresh / aging / rotting) each read clearly rather than
+        blending into a muddy single gradient.
+        """
+        f = max(0.0, min(1.0, freshness))
+        if f >= 0.5:
+            # 1.0 -> 0.5 : fresh (yellow) to aging (orange)
+            t = (1.0 - f) / 0.5
+            a, b = COLOR_FOOD_FRESH, COLOR_FOOD_AGING
+        else:
+            # 0.5 -> 0.0 : aging (orange) to rotting (red)
+            t = (0.5 - f) / 0.5
+            a, b = COLOR_FOOD_AGING, COLOR_FOOD_ROTTING
+        return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+    def _draw_gorillas(self, arena: CongoArena) -> None:
+        """Draw the translucent 'gorilla territory' zone over each reserved hotspot.
+
+        Rendered AFTER terrain but BEFORE food, so rotting food still shows
+        on top of the zone — visually telling the story: the food is right
+        there, but the silverback troop sitting on it keeps the chimpanzees
+        out, so it just rots. The solid gorilla "mass" core is drawn
+        separately by `_draw_gorilla_cores`, AFTER food, so the animal
+        itself is never buried under a pile of fruit sprites. The block
+        spans the full hotspot radius (the zone chimps are displaced from),
+        drawn via the same Y-flipped coordinate transform as everything
+        else so it lands exactly on the logic's gorilla zone.
+        """
+        for rect in self._gorilla_zone_rects(arena):
+            left, top, width, height = rect
+            block = pygame.Surface((width, height), pygame.SRCALPHA)
+            block.fill((*COLOR_GORILLA_FILL, COLOR_GORILLA_FILL_ALPHA))
+            self.screen.blit(block, (left, top))
+            pygame.draw.rect(
+                self.screen, COLOR_GORILLA_OUTLINE, pygame.Rect(left, top, width, height), width=2
+            )
+
+    def _draw_gorilla_cores(self, arena: CongoArena) -> None:
+        """Draw the solid dark gorilla 'mass' at each reserved hotspot center.
+
+        Drawn AFTER food so the occupying troop always reads clearly as a
+        heavy, present block even when fruit has piled up (and is rotting)
+        around it inside the zone.
+        """
+        for rect in self._gorilla_zone_rects(arena):
+            left, top, width, height = rect
+            core = max(CELL_SIZE * 2, min(width, height) // 3)
+            core_rect = pygame.Rect(0, 0, core, core)
+            core_rect.center = (left + width // 2, top + height // 2)
+            pygame.draw.rect(self.screen, COLOR_GORILLA_ICON, core_rect, border_radius=3)
+            pygame.draw.rect(self.screen, COLOR_GORILLA_OUTLINE, core_rect, width=2, border_radius=3)
+
+    def _gorilla_zone_rects(self, arena: CongoArena) -> List[Tuple[int, int, int, int]]:
+        """Compute the clamped (left, top, width, height) pixel rect of each
+        gorilla-occupied hotspot zone. Shared by the zone and core drawing
+        passes so both stay perfectly aligned.
+        """
+        eco = arena.ecosystem
+        grid_height = eco.height
+        radius = eco.north_hotspot_radius
+        rects: List[Tuple[int, int, int, int]] = []
+
+        for index, (hx, hy) in enumerate(eco.north_hotspots):
+            if not eco.hotspot_state[index]["gorilla_occupied"]:
+                continue
+
+            # The gorilla zone spans cells [hx-radius, hx+radius] x
+            # [hy-radius, hy+radius]. Convert the two extreme cell centers
+            # to pixel space (Y-flip makes the "top" pixel come from the
+            # HIGHER grid-y), then build the covering rect from them.
+            cx_min, cy_a = self._cell_center_px(hx - radius, hy - radius, grid_height)
+            cx_max, cy_b = self._cell_center_px(hx + radius, hy + radius, grid_height)
+
+            left = min(cx_min, cx_max) - CELL_SIZE // 2
+            top = min(cy_a, cy_b) - CELL_SIZE // 2
+            width = abs(cx_max - cx_min) + CELL_SIZE
+            height = abs(cy_b - cy_a) + CELL_SIZE
+
+            # Clamp to the grid panel so a hotspot near the edge doesn't
+            # bleed the block outside the play area.
+            left = max(GRID_ORIGIN[0], left)
+            top = max(GRID_ORIGIN[1], top)
+            right = min(GRID_ORIGIN[0] + GRID_PIXEL_WIDTH, left + width)
+            bottom = min(GRID_ORIGIN[1] + GRID_PIXEL_HEIGHT, top + height)
+            width = max(0, right - left)
+            height = max(0, bottom - top)
+            if width <= 0 or height <= 0:
+                continue
+
+            rects.append((left, top, width, height))
+        return rects
+
     def _draw_food(self, arena: CongoArena) -> None:
         grid_height = arena.ecosystem.height
-        glow_w, glow_h = self._food_glow_surface.get_size()
+        # Food is drawn as small SQUARES (agents are circles), so the two
+        # never blur together, and so food reads as little "pixels" nestled
+        # inside the larger square hotspot/gorilla blocks. Side length is
+        # kept below the cell size so individual items stay distinct even
+        # when several pile up in one cell.
+        side = max(3, CELL_SIZE - 4)
+        half = side // 2
         for item in arena.ecosystem.food_items:
             cx, cy = self._cell_center_px(item.x, item.y, grid_height)
-            self.screen.blit(
-                self._food_glow_surface, (cx - glow_w // 2, cy - glow_h // 2)
-            )
+            freshness = arena.ecosystem.get_food_freshness(item)
+            color = self._freshness_color(freshness)
+            # A soft square halo (dimmer as it rots) plus a solid square
+            # core, so fresh food still "glows" while rotting food reads as
+            # a flat, dull red block about to vanish.
+            halo_alpha = int(90 * freshness)
+            if halo_alpha > 0:
+                halo_side = side + 4
+                halo = pygame.Surface((halo_side, halo_side), pygame.SRCALPHA)
+                halo.fill((*color, halo_alpha))
+                self.screen.blit(halo, (cx - halo_side // 2, cy - halo_side // 2))
+            pygame.draw.rect(self.screen, color, pygame.Rect(cx - half, cy - half, side, side))
 
     def _draw_agents(self, arena: CongoArena) -> None:
         grid_height = arena.ecosystem.height
@@ -411,6 +536,12 @@ class SimulationRenderer:
         south_count = population - north_count
         avg_g_t = (sum(a.g_t for a in alive_agents) / population) if population else 0.0
         food_count = arena.ecosystem.food_count()
+        gorilla_zones = sum(1 for s in arena.ecosystem.hotspot_state if s["gorilla_occupied"])
+        open_patches = sum(
+            1
+            for s in arena.ecosystem.hotspot_state
+            if not s["gorilla_occupied"] and not s["depleted"]
+        )
 
         y = self._blit_line(x, y, "LIVING STATS", self.font_section, COLOR_HUD_ACCENT)
         y = self._blit_stat(x, y, "Step", f"{arena.current_step}")
@@ -419,6 +550,8 @@ class SimulationRenderer:
         y = self._blit_stat(x, y, "South Agents (Bonobo)", f"{south_count}")
         y = self._blit_stat(x, y, "Avg G_T (Aggression)", f"{avg_g_t:.3f}")
         y = self._blit_stat(x, y, "Food on Grid", f"{food_count}")
+        y = self._blit_stat(x, y, "Gorilla Zones (blocked)", f"{gorilla_zones}")
+        y = self._blit_stat(x, y, "Open North Patches", f"{open_patches}")
         y += 10
 
         # --- Legend ---
@@ -426,7 +559,10 @@ class SimulationRenderer:
         y = self._blit_swatch_line(x, y, GENE_COLOR_COOPERATIVE, "Cooperative  (G_T -> 0.0)")
         y = self._blit_swatch_line(x, y, GENE_COLOR_HYBRID, "Hybrid / Mutated (G_T ~ 0.5)")
         y = self._blit_swatch_line(x, y, GENE_COLOR_AGGRESSIVE, "Aggressive   (G_T -> 1.0)")
-        y = self._blit_swatch_line(x, y, COLOR_FOOD_GLOW, "Food item")
+        y = self._blit_swatch_line(x, y, COLOR_FOOD_FRESH, "Food: fresh")
+        y = self._blit_swatch_line(x, y, COLOR_FOOD_AGING, "Food: aging")
+        y = self._blit_swatch_line(x, y, COLOR_FOOD_ROTTING, "Food: rotting (about to vanish)")
+        y = self._blit_swatch_line(x, y, COLOR_GORILLA_ICON, "Gorilla troop (chimps blocked)")
         y = self._blit_marker_legend_line(x, y, "combat", "Combat / Attack event")
         y = self._blit_marker_legend_line(x, y, "birth", "Reproduction / birth event")
         y += 10
@@ -513,7 +649,9 @@ class SimulationRenderer:
 
         self.screen.fill(COLOR_BG)
         self._draw_terrain(arena)
+        self._draw_gorillas(arena)
         self._draw_food(arena)
+        self._draw_gorilla_cores(arena)
         self._draw_agents(arena)
         self._draw_flashes(arena, flash_manager)
         self._draw_hud(arena, fps=fps, paused=paused, save_message=save_message)

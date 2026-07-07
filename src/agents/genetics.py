@@ -84,6 +84,7 @@ class GeneticEngine:
         north_hotspot_reproduction_cost: float = 12.0,
         low_population_threshold: int = 5,
         low_population_mating_distance: int = 15,
+        reproduction_cooldown_steps: int = 0,
         rng: Optional[random.Random] = None,
     ) -> None:
         if not (0.0 <= crossover_weight_parent1 <= 1.0):
@@ -102,6 +103,7 @@ class GeneticEngine:
         self.north_hotspot_reproduction_cost = north_hotspot_reproduction_cost
         self.low_population_threshold = low_population_threshold
         self.low_population_mating_distance = low_population_mating_distance
+        self.reproduction_cooldown_steps = max(0, int(reproduction_cooldown_steps))
 
         self._rng = rng if rng is not None else random.Random()
 
@@ -149,6 +151,10 @@ class GeneticEngine:
             return False
         if action1 == ActionType.ATTACK or action2 == ActionType.ATTACK:
             return False
+        # Inter-birth interval: an agent still in its post-birth cooldown
+        # (lactation gap) cannot conceive again yet.
+        if agent1.is_on_reproduction_cooldown() or agent2.is_on_reproduction_cooldown():
+            return False
 
         max_distance = self.mating_max_distance
         if current_population is not None and current_population <= self.low_population_threshold:
@@ -156,6 +162,26 @@ class GeneticEngine:
 
         distance = max(abs(agent1.x - agent2.x), abs(agent1.y - agent2.y))
         return distance <= max_distance
+
+    def roll_conception(self, agent1: EvolvableAgent, agent2: EvolvableAgent) -> bool:
+        """Given a valid mating pair, roll whether conception actually occurs.
+
+        The effective conception probability is the AVERAGE of the two
+        parents' `g_fertility` genes. This is where the chimp/bonobo
+        birth-rate divergence lives: near-identical biology, but very
+        different effective fertility for social reasons. High-fertility
+        chimps (~0.85) breed fast; low-fertility bonobos (~0.30) breed
+        slowly and selectively, which also naturally damps population
+        booms toward a logistic equilibrium.
+
+        Population-rescue: if the total population is at/below
+        `low_population_threshold`, conception is guaranteed (returns
+        True) so a near-extinction remnant isn't also fighting the
+        fertility dice — the low-population mating-distance boost and this
+        together form the anti-extinction floor.
+        """
+        avg_fertility = 0.5 * (agent1.g_fertility + agent2.g_fertility)
+        return self._rng.random() < avg_fertility
 
     # ------------------------------------------------------------------
     # Crossover / mutation
@@ -204,6 +230,25 @@ class GeneticEngine:
     # ------------------------------------------------------------------
     # Reproduction
     # ------------------------------------------------------------------
+    def _inherit_independent_gene(
+        self, value1: float, value2: float, lo: float, hi: float
+    ) -> float:
+        """Blend + mutate an INDEPENDENT gene (e.g. g_size, g_fertility).
+
+        Unlike (g_t, g_e), these traits are not part of a sum-to-one
+        chromosome, so they're blended and mutated on their own natural
+        scale and clamped to [lo, hi] rather than renormalized. Mutation
+        reuses `mutation_rate`/`mutation_sigma`, scaled to the gene's own
+        range so the perturbation is proportional rather than a fixed
+        0.05 that would mean very different things for a [0,1] fertility
+        gene versus a ~[0.7,1.3] size gene.
+        """
+        blended = self._blend(value1, value2, self.crossover_weight_parent1)
+        if self._rng.random() < self.mutation_rate:
+            span = hi - lo
+            blended += self._rng.gauss(0.0, self.mutation_sigma * span)
+        return max(lo, min(hi, blended))
+
     def reproduce(
         self,
         parent1: EvolvableAgent,
@@ -222,6 +267,14 @@ class GeneticEngine:
         final_g_t, final_g_e = self._crossover_and_mutate_genes(parent1, parent2)
         offspring_generation = max(parent1.generation, parent2.generation) + 1
 
+        # Independent physiological genes are inherited on their own
+        # scales (not renormalized). Size stays in a plausible primate
+        # band; fertility strategy stays a probability in [0, 1].
+        child_size = self._inherit_independent_gene(parent1.g_size, parent2.g_size, 0.5, 1.6)
+        child_fertility = self._inherit_independent_gene(
+            parent1.g_fertility, parent2.g_fertility, 0.0, 1.0
+        )
+
         child = EvolvableAgent(
             agent_id=offspring_id,
             x=position[0],
@@ -230,6 +283,8 @@ class GeneticEngine:
             initial_energy=self.offspring_initial_energy,
             initial_stress=0.0,
             generation=offspring_generation,
+            g_size=child_size,
+            g_fertility=child_fertility,
             rng=self._rng,
         )
         # forced_g_t already derives g_e = 1 - g_t internally, which by

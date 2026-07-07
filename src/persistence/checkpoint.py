@@ -70,12 +70,22 @@ class CheckpointManager:
                 "gorilla_occupied_count": ecosystem.gorilla_occupied_count,
                 "depletion_threshold": ecosystem.depletion_threshold,
                 "depletion_recovery_steps": ecosystem.depletion_recovery_steps,
+                "gorilla_forage_rate": ecosystem.gorilla_forage_rate,
+                "gorilla_migration_threshold": ecosystem.gorilla_migration_threshold,
+                "gorilla_min_residence_steps": ecosystem.gorilla_min_residence_steps,
                 "midway_food_prob": ecosystem.midway_food_prob,
                 "midway_food_energy": ecosystem.midway_food_energy,
                 "midway_food_max_per_step": ecosystem.midway_food_max_per_step,
+                "food_decay_steps": ecosystem.food_decay_steps,
                 "hotspot_state": [dict(s) for s in ecosystem.hotspot_state],
                 "food_items": [
-                    {"x": item.x, "y": item.y, "food_type": item.food_type, "energy": item.energy}
+                    {
+                        "x": item.x,
+                        "y": item.y,
+                        "food_type": item.food_type,
+                        "energy": item.energy,
+                        "spawn_step": item.spawn_step,
+                    }
                     for item in ecosystem.food_items
                 ],
             },
@@ -86,6 +96,9 @@ class CheckpointManager:
                     "y": agent.y,
                     "g_e": agent.g_e,
                     "g_t": agent.g_t,
+                    "g_size": agent.g_size,
+                    "g_fertility": agent.g_fertility,
+                    "reproduction_cooldown": agent.reproduction_cooldown,
                     "energy": agent.energy,
                     "hunger": agent.hunger,
                     "stress": agent.stress,
@@ -172,11 +185,20 @@ class CheckpointManager:
             gorilla_occupied_count=eco_data.get("gorilla_occupied_count", 2),
             depletion_threshold=eco_data.get("depletion_threshold", 400.0),
             depletion_recovery_steps=eco_data.get("depletion_recovery_steps", 40),
+            gorilla_forage_rate=eco_data.get("gorilla_forage_rate", 3.0),
+            gorilla_migration_threshold=eco_data.get("gorilla_migration_threshold", 600.0),
+            gorilla_min_residence_steps=eco_data.get("gorilla_min_residence_steps", 150),
             midway_food_prob=eco_data.get("midway_food_prob", 0.15),
             midway_food_energy=eco_data.get("midway_food_energy", 4.0),
             midway_food_max_per_step=eco_data.get("midway_food_max_per_step", 2),
+            food_decay_steps=eco_data.get("food_decay_steps", 100),
             rng_seed=rng_seed,
         )
+        # Restore the ecosystem's step counter BEFORE re-adding food, so
+        # any item without a recorded spawn_step (old checkpoint) is
+        # stamped with the current step rather than 0 (which would make it
+        # instantly rot on resume).
+        ecosystem.current_step = data["step"]
         # The constructor already generated a fresh, randomized set of
         # hotspots. If this checkpoint recorded specific hotspot
         # coordinates (the normal case), overwrite them so the restored
@@ -192,7 +214,13 @@ class CheckpointManager:
 
         for item in eco_data["food_items"]:
             ecosystem.add_food(
-                x=item["x"], y=item["y"], food_type=item["food_type"], energy=item["energy"]
+                x=item["x"],
+                y=item["y"],
+                food_type=item["food_type"],
+                energy=item["energy"],
+                # Preserve exact remaining freshness; fall back to the
+                # current step for pre-decay checkpoints (treated as fresh).
+                spawn_step=item.get("spawn_step", ecosystem.current_step),
             )
 
         # initial_population=0: population is restored explicitly below,
@@ -222,6 +250,9 @@ class CheckpointManager:
                 generation=agent_data["generation"],
                 age=agent_data.get("age", 0),
                 max_age=agent_data.get("max_age", None),
+                g_size=agent_data.get("g_size", 1.0),
+                g_fertility=agent_data.get("g_fertility", 0.5),
+                reproduction_cooldown=agent_data.get("reproduction_cooldown", 0),
                 rng=arena._rng,
             )
             # forced_g_t already reproduces g_e = 1 - g_t; explicitly

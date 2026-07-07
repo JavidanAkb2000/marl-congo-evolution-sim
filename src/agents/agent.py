@@ -95,6 +95,9 @@ class EvolvableAgent:
         generation: int = 0,
         age: int = 0,
         max_age: Optional[int] = None,
+        g_size: float = 1.0,
+        g_fertility: float = 0.5,
+        reproduction_cooldown: int = 0,
         rng: Optional[random.Random] = None,
     ) -> None:
         """Initialize a new EvolvableAgent.
@@ -126,6 +129,30 @@ class EvolvableAgent:
                       no cap — the agent can theoretically live forever,
                       which is also the default for full backward
                       compatibility with any code that doesn't set this.
+            g_size: Body-size / metabolism gene (a positive multiplier,
+                    ~1.0 = baseline). Larger-bodied agents (chimpanzees,
+                    ~1.2) burn proportionally more energy per action but
+                    are stronger in combat; lighter agents (bonobos,
+                    ~0.85) are metabolically cheaper. This is an
+                    INDEPENDENT trait, NOT part of the G_T + G_E = 1.0
+                    chromosome — it scales metabolic cost and combat
+                    weight, directly feeding the per-bank carrying-capacity
+                    math that governs long-run survival.
+            g_fertility: Fertility-strategy gene in [0.0, 1.0] — the
+                    per-attempt probability that an otherwise-eligible
+                    agent actually conceives when it mates. High for
+                    chimpanzees (~0.85: an alpha-driven, fast, aggressive
+                    breeding strategy) and low for bonobos (~0.30: a
+                    selective, socially-gated, slow strategy). Encodes the
+                    real primatology finding that the two species have
+                    near-identical BIOLOGY (gestation, inter-birth
+                    interval) but very different effective birth rates for
+                    SOCIAL reasons. Also an independent trait.
+            reproduction_cooldown: Remaining simulation ticks before this
+                    agent may reproduce again (the inter-birth interval /
+                    lactation gap). Decrements each step; reproduction is
+                    blocked while > 0. Exposed for exact checkpoint
+                    restore.
             rng: Optional shared random.Random instance for reproducible
                  experiments. A private instance is created if omitted.
         """
@@ -147,10 +174,17 @@ class EvolvableAgent:
             self.g_t = self._rng.uniform(0.0, 1.0)
         self.g_e = 1.0 - self.g_t
 
+        # --- Independent physiological / life-history genes ---
+        # These are NOT part of the G_T + G_E = 1.0 invariant; they are
+        # separate heritable traits with their own valid ranges.
+        self.g_size = max(0.1, float(g_size))
+        self.g_fertility = max(0.0, min(1.0, float(g_fertility)))
+
         # --- Bio-Energetic State ---
         self.energy = max(0.0, min(100.0, initial_energy))
         self.hunger = 100.0 - self.energy
         self.stress = max(0.0, min(100.0, initial_stress))
+        self.reproduction_cooldown = max(0, int(reproduction_cooldown))
 
         self.is_alive = self.energy > 0.0
 
@@ -175,6 +209,18 @@ class EvolvableAgent:
         Always False if `max_age` is None (no cap configured).
         """
         return self.max_age is not None and self.age >= self.max_age
+
+    # ------------------------------------------------------------------
+    # Reproduction cooldown (inter-birth interval)
+    # ------------------------------------------------------------------
+    def tick_reproduction_cooldown(self, amount: int = 1) -> None:
+        """Count this agent's reproduction cooldown down toward 0 (never below)."""
+        if self.reproduction_cooldown > 0:
+            self.reproduction_cooldown = max(0, self.reproduction_cooldown - amount)
+
+    def is_on_reproduction_cooldown(self) -> bool:
+        """True while the agent is still within its post-birth waiting interval."""
+        return self.reproduction_cooldown > 0
 
     # ------------------------------------------------------------------
     # Fuzzy membership functions
@@ -402,7 +448,11 @@ class EvolvableAgent:
         if not self.is_alive:
             return False
 
-        cost = self.ENERGY_COST.get(action, 1.0)
+        # Metabolic cost scales with body size (g_size): a heavier
+        # chimpanzee (~1.2) burns proportionally more energy per action
+        # than a lighter bonobo (~0.85). This is the core lever by which
+        # body size feeds each bank's carrying-capacity math.
+        cost = self.ENERGY_COST.get(action, 1.0) * self.g_size
         self.energy = max(0.0, min(100.0, self.energy - cost))
         self.hunger = 100.0 - self.energy
 
@@ -487,6 +537,9 @@ class EvolvableAgent:
             "max_age": self.max_age,
             "g_e": self.g_e,
             "g_t": self.g_t,
+            "g_size": self.g_size,
+            "g_fertility": self.g_fertility,
+            "reproduction_cooldown": self.reproduction_cooldown,
             "energy": self.energy,
             "hunger": self.hunger,
             "stress": self.stress,

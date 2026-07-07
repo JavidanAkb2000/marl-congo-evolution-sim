@@ -88,9 +88,15 @@ def build_arena(rng_seed: int = 2026) -> CongoArena:
         gorilla_occupied_count=2,          # 2 richest spots permanently held by silverback troops
         depletion_threshold=800.0,         # open patches are the ONLY food, so exhaust them slowly
         depletion_recovery_steps=20,       # short dark period so a depleted patch returns quickly
+        gorilla_forage_rate=3.0,           # how fast a resident troop eats down its patch
+        gorilla_migration_threshold=1200.0,  # foraged-energy a troop consumes before moving on
+        gorilla_min_residence_steps=400,   # min steps a troop stays put -> chimps get time to settle
+                                           # (too-frequent migration kept disrupting settled chimps;
+                                           # slower migration validated at 5/5 seed North survival)
         midway_food_prob=0.15,             # sparse: travel snacks appear on only ~15% of steps
         midway_food_energy=4.0,            # low-value filler (~1/9 of a real hotspot meal at 35)
         midway_food_max_per_step=2,        # at most 2 snacks/step -> corridor stays lean, not a patch
+        food_decay_steps=100,              # uneaten food rots after ~100 steps (fresh->aging->rotting)
         rng_seed=rng_seed,
     )
     genetic_engine = GeneticEngine(
@@ -105,6 +111,8 @@ def build_arena(rng_seed: int = 2026) -> CongoArena:
         north_hotspot_reproduction_cost=18.0,
         low_population_threshold=5,   # <=5 total agents alive -> "crisis" mate-seeking mode
         low_population_mating_distance=15,  # dramatically widened search range in a crisis
+        reproduction_cooldown_steps=60,  # inter-birth interval (lactation gap): damps population booms
+                                         # toward a logistic equilibrium and slows both banks' turnover
     )
     interaction_resolver = InteractionResolver()
 
@@ -131,6 +139,10 @@ def build_arena(rng_seed: int = 2026) -> CongoArena:
         migration_vision_radius=45,       # must exceed inter-hotspot distance (~27) so the OTHER open
                                           # patch is always visible to migrate to; grid is 50 wide, so
                                           # 45 covers essentially any North hotspot pair
+        north_gene_means=(1.2, 0.85),     # chimp: heavy body (costly metabolism, strong), high fertility
+        south_gene_means=(0.85, 0.30),    # bonobo: light body (cheap metabolism), low/selective fertility
+        north_reproduction_cooldown=20,   # SHORT: chimps breed fast to replace high losses (r-selected)
+        south_reproduction_cooldown=60,   # LONG: bonobos stay damped toward equilibrium (K-selected)
         foraging_radius=5,
         food_seeking_bias=0.9,
     )
@@ -241,6 +253,7 @@ def main() -> None:
             north_hotspot_reproduction_cost=12.0,
             low_population_threshold=5,
             low_population_mating_distance=15,
+            reproduction_cooldown_steps=60,
         ),
         interaction_resolver=InteractionResolver(),
         perception_radius=3,

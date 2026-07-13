@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Optional
 
 # Ensure the project root is importable when this script is executed
 # directly (e.g. `uv run scripts/run_simulation.py`) regardless of the
@@ -39,6 +40,15 @@ from src.environment.ecosystem import CongoEcosystem  # noqa: E402
 from src.environment.interactions import InteractionResolver  # noqa: E402
 from src.persistence.checkpoint import CheckpointManager  # noqa: E402
 
+# All tunable scientific parameters live in scripts/config.py. build_arena()
+# reads exclusively from these dicts, so an experiment is defined in one place.
+from config import (  # noqa: E402
+    ARENA_CONFIG,
+    ECOSYSTEM_CONFIG,
+    GENETICS_CONFIG,
+    SIM_CONFIG,
+)
+
 LINE = "=" * 78
 
 
@@ -49,102 +59,38 @@ def print_header(title: str) -> None:
     print(LINE)
 
 
-def build_arena(rng_seed: int = 2026) -> CongoArena:
-    """Construct a fresh, fully-wired CongoArena.
+def build_arena(rng_seed: Optional[int] = None) -> CongoArena:
+    """Construct a fresh, fully-wired CongoArena from scripts/config.py.
+
+    Every scientific parameter is sourced from the ECOSYSTEM_CONFIG,
+    GENETICS_CONFIG, ARENA_CONFIG, and SIM_CONFIG dicts in config.py -- so
+    to define a new experiment, edit (or copy) that file rather than this
+    function. `rng_seed` may be passed to override the config default seed
+    for a single run (used by parameter sweeps / variance studies); if
+    None, the config default is used.
 
     Demographic profile (Gorilla-competition / resource-patchiness model):
-        - North Bank (Chimpanzee): 80 starting agents (down from an
-          earlier 140 — the original count mathematically guaranteed
-          starvation regardless of behavior; confirmed via a controlled
-          test where even a 100%-cooperative North population still
-          collapsed from pure resource math). Food concentrated in 4
-          fixed hotspots, now calibrated to ~150-200 combined energy/step
-          — enough to actually sustain ~80 agents living around them,
-          not just enough to bait them into a hotspot and starve.
-          Cheaper/faster reproduction while holding a hotspot, and a
-          short lifespan cap — a high-turnover, high-combat, "many
-          small-bodied competitors" strategy.
-        - South Bank (Bonobo): 60 starting agents, food spread uniformly
-          and stably across the whole bank, standard reproduction
-          economics, and NO lifespan cap — a low-turnover, low-conflict,
-          K-selected strategy that shouldn't have an artificial extinction
-          deadline imposed on a population stall.
+        - North Bank (Chimpanzee): a modest founder troop that grows into
+          the 2 open (non-gorilla) hotspots. Food is patchy and contested,
+          favoring a high-turnover, high-combat strategy.
+        - South Bank (Bonobo): a larger, peaceful population on an even
+          food carpet, with slow K-selected breeding and realistic long
+          lifespans.
     """
-    ecosystem = CongoEcosystem(
-        width=50,
-        height=50,
-        river_y=25,
-        north_spawn_prob=0.55,             # raised: only 2 of 4 patches are open (gorillas hold 2),
-                                           # so open patches must produce more to feed the population
-        south_spawn_prob=0.50,
-        north_food_energy=35.0,            # boosted: one hotspot meal dwarfs the -10 ATTACK cost
-        south_food_energy=40.0,
-        south_cluster_size_range=(2, 4),
-        south_cluster_radius=2,
-        north_hotspot_count=4,             # 4 choke-points: 2 gorilla-held + 2 open/contested
-        north_hotspot_radius=3,
-        north_hotspot_spawn_size=(4, 8),   # dense per-firing drop, offsetting the halved patch count
-        south_isolated_fruit_chance=0.30,  # South stays broadly uniform/stable (no gorillas)
-        gorilla_occupied_count=2,          # 2 richest spots permanently held by silverback troops
-        depletion_threshold=800.0,         # open patches are the ONLY food, so exhaust them slowly
-        depletion_recovery_steps=20,       # short dark period so a depleted patch returns quickly
-        gorilla_forage_rate=3.0,           # how fast a resident troop eats down its patch
-        gorilla_migration_threshold=1200.0,  # foraged-energy a troop consumes before moving on
-        gorilla_min_residence_steps=400,   # min steps a troop stays put -> chimps get time to settle
-                                           # (too-frequent migration kept disrupting settled chimps;
-                                           # slower migration validated at 5/5 seed North survival)
-        midway_food_prob=0.15,             # sparse: travel snacks appear on only ~15% of steps
-        midway_food_energy=4.0,            # low-value filler (~1/9 of a real hotspot meal at 35)
-        midway_food_max_per_step=2,        # at most 2 snacks/step -> corridor stays lean, not a patch
-        food_decay_steps=100,              # uneaten food rots after ~100 steps (fresh->aging->rotting)
-        rng_seed=rng_seed,
-    )
-    genetic_engine = GeneticEngine(
-        reproduction_energy_threshold=65.0,
-        reproduction_cost=22.0,
-        crossover_weight_parent1=0.6,
-        mutation_rate=0.05,
-        mutation_sigma=0.05,
-        offspring_initial_energy=50.0,
-        mating_max_distance=1,
-        north_hotspot_fertility_threshold=45.0,  # North breeds while holding an open patch
-        north_hotspot_reproduction_cost=18.0,
-        low_population_threshold=5,   # <=5 total agents alive -> "crisis" mate-seeking mode
-        low_population_mating_distance=15,  # dramatically widened search range in a crisis
-        reproduction_cooldown_steps=60,  # inter-birth interval (lactation gap): damps population booms
-                                         # toward a logistic equilibrium and slows both banks' turnover
-    )
+    seed = SIM_CONFIG["rng_seed"] if rng_seed is None else rng_seed
+
+    ecosystem = CongoEcosystem(rng_seed=seed, **ECOSYSTEM_CONFIG)
+    genetic_engine = GeneticEngine(**GENETICS_CONFIG)
     interaction_resolver = InteractionResolver()
 
     arena = CongoArena(
         ecosystem=ecosystem,
-        initial_population=140,       # kept for backward compatibility; overridden below
-        perception_radius=3,
         genetic_engine=genetic_engine,
         interaction_resolver=interaction_resolver,
         max_steps=None,
-        rng_seed=rng_seed,
-        initial_north_population=30,      # sized to grow into the 2 open patches, not shock-collapse
-        initial_south_population=60,
-        north_max_age_range=(200, 350),   # stress/combat-worn, but long enough to reproduce first
-        south_max_age_range=None,         # aging disabled entirely for the stable Bonobo population
-        north_clan_spawn_radius=5,        # troupe starts living AROUND its open hotspot
-        gorilla_stress_penalty=15.0,      # meaningful stress hit, not an instant death sentence
-        gorilla_energy_penalty=1.0,       # light energy cost of being chased off
-        north_birth_dispersal_radius=6,   # newborn Chimps scatter (fission), breaking super-colonies
-        crowding_radius=3,                # neighborhood size for measuring local density
-        crowding_soft_cap=8,              # crowd beyond this starts adding soft stress (no direct death)
-        crowding_stress_per_excess=1.5,   # stress added per agent over the soft cap
-        crowding_migration_trigger=10,    # local crowd at/above this makes an agent seek another patch
-        migration_vision_radius=45,       # must exceed inter-hotspot distance (~27) so the OTHER open
-                                          # patch is always visible to migrate to; grid is 50 wide, so
-                                          # 45 covers essentially any North hotspot pair
-        north_gene_means=(1.2, 0.85),     # chimp: heavy body (costly metabolism, strong), high fertility
-        south_gene_means=(0.85, 0.30),    # bonobo: light body (cheap metabolism), low/selective fertility
-        north_reproduction_cooldown=20,   # SHORT: chimps breed fast to replace high losses (r-selected)
-        south_reproduction_cooldown=60,   # LONG: bonobos stay damped toward equilibrium (K-selected)
-        foraging_radius=5,
-        food_seeking_bias=0.9,
+        rng_seed=seed,
+        perception_radius=SIM_CONFIG["perception_radius"],
+        **ARENA_CONFIG,
     )
     return arena
 
@@ -241,23 +187,10 @@ def main() -> None:
     print_header("RELOADING CHECKPOINT INTO A NEW ARENA")
     restored_arena = CheckpointManager.load(
         checkpoint_path,
-        genetic_engine=GeneticEngine(
-            reproduction_energy_threshold=65.0,
-            reproduction_cost=20.0,
-            crossover_weight_parent1=0.6,
-            mutation_rate=0.05,
-            mutation_sigma=0.05,
-            offspring_initial_energy=50.0,
-            mating_max_distance=1,
-            north_hotspot_fertility_threshold=50.0,
-            north_hotspot_reproduction_cost=12.0,
-            low_population_threshold=5,
-            low_population_mating_distance=15,
-            reproduction_cooldown_steps=60,
-        ),
+        genetic_engine=GeneticEngine(**GENETICS_CONFIG),
         interaction_resolver=InteractionResolver(),
-        perception_radius=3,
-        rng_seed=2026,
+        perception_radius=SIM_CONFIG["perception_radius"],
+        rng_seed=SIM_CONFIG["rng_seed"],
     )
     restored_snapshot = snapshot(restored_arena)
     print(
